@@ -47,6 +47,21 @@ pub fn fit_within(src_w: i32, src_h: i32, area: Rect) -> Option<Rect> {
     })
 }
 
+/// 画面の座標の点を、窓の message の LPARAM に載せる形にする (x と y を 16 bit ずつ。Windows の
+/// マウスの message と同じ範囲)。
+pub fn pack_point(x: i32, y: i32) -> isize {
+    let x = x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16 as u16;
+    let y = y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16 as u16;
+    (u32::from(x) | (u32::from(y) << 16)) as isize
+}
+
+/// `pack_point` の逆。
+pub fn unpack_point(packed: isize) -> (i32, i32) {
+    let x = (packed & 0xFFFF) as u16 as i16;
+    let y = ((packed >> 16) & 0xFFFF) as u16 as i16;
+    (i32::from(x), i32::from(y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,6 +72,13 @@ mod tests {
         right: 210,
         bottom: 120,
     }; // 200x100
+
+    #[test]
+    fn packed_points_keep_negative_coordinates() {
+        for (x, y) in [(0, 0), (-1200, -5), (3839, 2159), (-32768, 32767)] {
+            assert_eq!(unpack_point(pack_point(x, y)), (x, y), "{x},{y}");
+        }
+    }
 
     #[test]
     fn large_source_shrinks_to_fit() {

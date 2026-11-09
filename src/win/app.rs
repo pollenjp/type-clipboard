@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use type_clipboard::candidate::{Elevation, is_pickable};
-use type_clipboard::geometry::Rect;
+use type_clipboard::geometry::{Rect, unpack_point};
 use type_clipboard::keymap::Layout;
 use type_clipboard::settings::{self, Settings, WindowRect};
 use type_clipboard::status::{self, Kind, Status};
@@ -222,6 +222,12 @@ unsafe extern "system" fn list_proc(
     }
 }
 
+/// hook が LPARAM に載せた画面の座標の点。
+fn point_from(lparam: LPARAM) -> POINT {
+    let (x, y) = unpack_point(lparam.0);
+    POINT { x, y }
+}
+
 fn loword(value: usize) -> u16 {
     (value & 0xFFFF) as u16
 }
@@ -399,11 +405,11 @@ impl App {
                 Some(LRESULT(0))
             }
             WM_APP_PICK_MOVE => {
-                self.on_pick_move();
+                self.on_pick_move(point_from(lparam));
                 Some(LRESULT(0))
             }
             WM_APP_PICK_CLICK => {
-                self.on_pick_click();
+                self.on_pick_click(point_from(lparam));
                 Some(LRESULT(0))
             }
             WM_APP_PICK_CANCEL => {
@@ -771,26 +777,25 @@ impl App {
         (!root.is_invalid() && is_pickable(&target::facts(root))).then_some(root)
     }
 
-    fn on_pick_move(&self) {
+    fn on_pick_move(&self, point: POINT) {
         if !self.picking.get() {
             return;
         }
-        let pointed = self.pickable_at(hooks::last_point());
+        let pointed = self.pickable_at(point);
         if pointed != self.candidate.get() {
             self.candidate.set(pointed);
             self.refresh_preview();
         }
     }
 
-    fn on_pick_click(&self) {
+    /// `point` はクリックした点 (hook がクリックのときに載せたもの)。
+    fn on_pick_click(&self, point: POINT) {
         if !self.picking.get() {
             return;
         }
-        let chosen = self.pickable_at(hooks::last_point());
+        let chosen = self.pickable_at(point);
         self.end_pick();
-        // クリックのボタンを離す方も握りつぶすため、離すまで hook を残す
-        // SAFETY: 主窓の timer
-        unsafe { SetTimer(Some(self.hwnd), TIMER_PICK_RELEASE, PICK_RELEASE_MS, None) };
+        self.release_pick_hooks_after_buttons();
         match chosen {
             Some(hwnd) => self.choose_target(hwnd),
             None => {
@@ -805,9 +810,20 @@ impl App {
             return;
         }
         self.end_pick();
-        self.release_pick_hooks();
+        self.release_pick_hooks_after_buttons();
         self.refresh_preview();
         self.set_status(status::pick_cancelled());
+    }
+
+    /// 押す方を握りつぶしたボタンがあれば、離す方も握りつぶすため、離すまで (長くて
+    /// `PICK_RELEASE_MS`) hook を残す。無ければすぐ外す。
+    fn release_pick_hooks_after_buttons(&self) {
+        if hooks::buttons_pending() {
+            // SAFETY: 主窓の timer
+            unsafe { SetTimer(Some(self.hwnd), TIMER_PICK_RELEASE, PICK_RELEASE_MS, None) };
+        } else {
+            self.release_pick_hooks();
+        }
     }
 
     fn end_pick(&self) {

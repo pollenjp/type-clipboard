@@ -5,6 +5,7 @@
 pub mod candidate;
 pub mod geometry;
 pub mod keymap;
+pub mod pick;
 pub mod secret;
 pub mod settings;
 pub mod status;

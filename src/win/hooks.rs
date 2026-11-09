@@ -1,7 +1,7 @@
 //! 低レベルのキーボードとマウスの hook。入れるのは「クリックで選ぶ」の間と、打っている間だけ。
 //!
 //! - クリックで選ぶ: マウスの位置を主窓に知らせ、左クリックを握りつぶして (相手の窓に届けず) 決める。
-//!   Esc・右クリックでやめる。
+//!   Esc・左以外のボタンでやめる。押す方を握りつぶしたボタンは、離す方も握りつぶす (`PickMouse`)。
 //! - 打っている間: このアプリが送った入力 (`INPUT_MARK` の印つき) でないキーの押下かクリックがあれば、
 //!   止める合図を立てる。キーの押下は打つ先に届けない。
 //!
@@ -11,6 +11,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use type_clipboard::geometry::pack_point;
+use type_clipboard::pick::{Button, MouseEvent, PickMouse, PickNotice};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
@@ -36,9 +38,7 @@ struct HookState {
     mode: HookMode,
     notify: HWND,
     abort: Arc<AtomicBool>,
-    point: POINT,
-    /// 握りつぶした左クリックの、ボタンを離す方も握りつぶす
-    swallow_left_up: bool,
+    pick: PickMouse,
 }
 
 thread_local! {
@@ -73,8 +73,7 @@ pub fn install(
             mode,
             notify,
             abort,
-            point: POINT::default(),
-            swallow_left_up: false,
+            pick: PickMouse::default(),
         })
     });
     let clear = || STATE.with(|state| *state.borrow_mut() = None);
@@ -95,14 +94,46 @@ pub fn install(
     }
 }
 
-/// 「クリックで選ぶ」の最後のマウスの位置 (画面の座標)。
-pub fn last_point() -> POINT {
-    STATE.with(|state| state.borrow().as_ref().map(|s| s.point).unwrap_or_default())
+/// 「クリックで選ぶ」で、押す方を握りつぶして、まだ離されていないボタンがあるか。
+pub fn buttons_pending() -> bool {
+    STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| s.pick.has_pending_up())
+    })
 }
 
-fn post(hwnd: HWND, msg: u32) {
+fn post(hwnd: HWND, msg: u32, lparam: isize) {
     // SAFETY: 主窓へ知らせを置くだけ (hook の中で待たない)
-    let _ = unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)) };
+    let _ = unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(lparam)) };
+}
+
+/// LL hook の mouse の message を、ボタンの扱いの入力にする。
+fn mouse_event(msg: u32) -> MouseEvent {
+    match msg {
+        WM_MOUSEMOVE => MouseEvent::Move,
+        WM_LBUTTONDOWN => MouseEvent::Down(Button::Left),
+        WM_LBUTTONUP => MouseEvent::Up(Button::Left),
+        WM_RBUTTONDOWN => MouseEvent::Down(Button::Right),
+        WM_RBUTTONUP => MouseEvent::Up(Button::Right),
+        WM_MBUTTONDOWN => MouseEvent::Down(Button::Middle),
+        WM_MBUTTONUP => MouseEvent::Up(Button::Middle),
+        WM_XBUTTONDOWN => MouseEvent::Down(Button::X),
+        WM_XBUTTONUP => MouseEvent::Up(Button::X),
+        _ => MouseEvent::Other,
+    }
+}
+
+/// 主窓へ知らせる。動いた・クリックの点は LPARAM に載せる (後から読むと、その間に動いた点になるため)。
+fn notify_pick(hwnd: HWND, notice: PickNotice, point: POINT) {
+    let at = pack_point(point.x, point.y);
+    match notice {
+        PickNotice::Move => post(hwnd, WM_APP_PICK_MOVE, at),
+        PickNotice::Click => post(hwnd, WM_APP_PICK_CLICK, at),
+        PickNotice::Cancel => post(hwnd, WM_APP_PICK_CANCEL, 0),
+        PickNotice::Released => post(hwnd, WM_APP_PICK_RELEASED, 0),
+    }
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -119,7 +150,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             Some(s)
                 if s.mode == HookMode::Pick && pressed && info.vkCode == u32::from(VK_ESCAPE.0) =>
             {
-                post(s.notify, WM_APP_PICK_CANCEL);
+                post(s.notify, WM_APP_PICK_CANCEL, 0);
                 true
             }
             _ => false,
@@ -150,30 +181,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     }
                     false
                 }
-                HookMode::Pick => match msg {
-                    WM_MOUSEMOVE => {
-                        s.point = info.pt;
-                        post(s.notify, WM_APP_PICK_MOVE);
-                        false
+                HookMode::Pick => {
+                    let (swallow, notice) = s.pick.handle(mouse_event(msg));
+                    if let Some(notice) = notice {
+                        notify_pick(s.notify, notice, info.pt);
                     }
-                    WM_LBUTTONDOWN => {
-                        s.point = info.pt;
-                        s.swallow_left_up = true;
-                        post(s.notify, WM_APP_PICK_CLICK);
-                        true
-                    }
-                    WM_LBUTTONUP if s.swallow_left_up => {
-                        s.swallow_left_up = false;
-                        post(s.notify, WM_APP_PICK_RELEASED);
-                        true
-                    }
-                    WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
-                        post(s.notify, WM_APP_PICK_CANCEL);
-                        true
-                    }
-                    WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => true,
-                    _ => false,
-                },
+                    swallow
+                }
             }
         });
         if swallow {
