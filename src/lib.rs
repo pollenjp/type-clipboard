@@ -4,4 +4,5 @@
 
 pub mod keymap;
 pub mod secret;
+pub mod settings;
 pub mod typing;
