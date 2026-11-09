@@ -3,3 +3,5 @@
 //! Win32 を呼ぶ部分は bin の側 (`src/win/`) に置く。
 
 pub mod keymap;
+pub mod secret;
+pub mod typing;
