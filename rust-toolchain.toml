@@ -1,0 +1,6 @@
+# CI (rustup) と手元の devShell (flake.nix の rust-overlay) が、ここに書いた同じ版を使う。
+# 版を上げるときは、公開から 7 日以上たった stable にする。
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
