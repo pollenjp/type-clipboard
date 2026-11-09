@@ -1,0 +1,57 @@
+name: Release
+
+# tag (v*) を push したら、exe を作って GitHub Release に置く
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: exe を作る
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust のツールチェーンを入れる (版は rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: test
+        run: cargo test --locked
+      - name: release ビルド
+        run: cargo build --locked --release
+      - name: SHA-256 を書く
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash target/release/type-clipboard.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path target/release/type-clipboard.exe.sha256 -Value "$hash  type-clipboard.exe" -Encoding ascii
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            target/release/type-clipboard.exe
+            target/release/type-clipboard.exe.sha256
+          if-no-files-found: error
+
+  # 書き込みの権限は、ビルドしないこの job にだけ渡す
+  release:
+    name: Release に置く
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: Release を作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$TAG"
+          dist/type-clipboard.exe dist/type-clipboard.exe.sha256
+          --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
