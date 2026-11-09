@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: fmt・clippy・test・release ビルド
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust のツールチェーンを入れる (版は rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked
+      - name: release ビルド
+        run: cargo build --locked --release
+      # merge の前に作者が試せるよう、PR と main の exe を成果物に置く
+      - name: exe を成果物に上げる
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: type-clipboard
+          path: target/release/type-clipboard.exe
+          if-no-files-found: error
+
+  lock-age:
+    name: flake.lock の猶予 (公開から 7 日)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: flake.lock の pin が出たばかりの revision でないか
+        run: nix run 'github:pollenjp/dotfiles?dir=nix#flake-lock-age' -- check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

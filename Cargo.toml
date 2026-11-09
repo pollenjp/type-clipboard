@@ -1,0 +1,43 @@
+[package]
+name = "type-clipboard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "クリップボードの文字を、選んだ窓へキー入力として打ち込む Windows のアプリ"
+license = "MIT"
+repository = "https://github.com/pollenjp/type-clipboard"
+publish = false
+
+[dependencies]
+
+# Win32 は Microsoft の windows crate で直に呼ぶ。Windows の target のときだけ使う
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62.2"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_TextServices",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[build-dependencies]
+# manifest (comctl32 v6・Per-Monitor V2 の DPI) を exe に埋め込む。rc.exe などの外部の道具が要らない
+embed-manifest = "1.5.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
