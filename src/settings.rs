@@ -12,6 +12,8 @@ use crate::typing::Mode;
 pub const DEFAULT_INTERVAL_MS: u32 = 30;
 /// 1 文字ごとの間隔の上限 (ms)。
 pub const MAX_INTERVAL_MS: u32 = 1000;
+/// 打つ先の配列の既定 (設定に無いとき)。手元の Windows の配列にはよらない。
+pub const DEFAULT_LAYOUT: Layout = Layout::Us;
 
 /// 窓の位置と大きさ (画面の座標・物理 pixel)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,8 +27,7 @@ pub struct WindowRect {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub mode: Mode,
-    /// `None` は「手元の Windows の今の配列に合わせる」(起動したときに決める)
-    pub layout: Option<Layout>,
+    pub layout: Layout,
     pub interval_ms: u32,
     pub always_on_top: bool,
     pub window: Option<WindowRect>,
@@ -36,7 +37,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             mode: Mode::KeyPosition,
-            layout: None,
+            layout: DEFAULT_LAYOUT,
             interval_ms: DEFAULT_INTERVAL_MS,
             always_on_top: true,
             window: None,
@@ -59,7 +60,11 @@ impl Settings {
                         s.mode = mode;
                     }
                 }
-                "layout" => s.layout = Layout::from_key(value),
+                "layout" => {
+                    if let Some(layout) = Layout::from_key(value) {
+                        s.layout = layout;
+                    }
+                }
                 "interval_ms" => {
                     if let Ok(ms) = value.parse::<u32>() {
                         s.interval_ms = ms.min(MAX_INTERVAL_MS);
@@ -80,9 +85,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         let mut text = String::new();
         let _ = writeln!(text, "mode={}", self.mode.key());
-        if let Some(layout) = self.layout {
-            let _ = writeln!(text, "layout={}", layout.key());
-        }
+        let _ = writeln!(text, "layout={}", self.layout.key());
         let _ = writeln!(text, "interval_ms={}", self.interval_ms);
         let _ = writeln!(text, "always_on_top={}", self.always_on_top);
         if let Some(r) = self.window {
@@ -143,7 +146,7 @@ mod tests {
     fn round_trip() {
         let s = Settings {
             mode: Mode::Unicode,
-            layout: Some(Layout::Us),
+            layout: Layout::Jis,
             interval_ms: 80,
             always_on_top: false,
             window: Some(WindowRect {
@@ -164,10 +167,17 @@ mod tests {
     fn defaults_follow_the_spec() {
         let s = Settings::default();
         assert_eq!(s.mode, Mode::KeyPosition);
-        assert_eq!(s.layout, None);
+        assert_eq!(s.layout, Layout::Us);
         assert_eq!(s.interval_ms, 30);
         assert!(s.always_on_top);
         assert_eq!(s.window, None);
+    }
+
+    #[test]
+    fn saved_layout_wins_over_the_default() {
+        assert_eq!(Settings::parse("").layout, Layout::Us);
+        assert_eq!(Settings::parse("layout=jis\n").layout, Layout::Jis);
+        assert_eq!(Settings::parse("layout=us\n").layout, Layout::Us);
     }
 
     #[test]
@@ -210,7 +220,7 @@ mod tests {
     #[test]
     fn only_known_keys_are_written() {
         let s = Settings {
-            layout: Some(Layout::Jis),
+            layout: Layout::Jis,
             window: Some(WindowRect {
                 x: 0,
                 y: 0,
