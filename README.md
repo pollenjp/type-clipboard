@@ -176,6 +176,9 @@ SVG ではなく script を直し、devShell の中で `python3 docs/images/make
 `Cargo.toml` の version を上げて main に入れた後、`v0.1.0` のような tag を push する。workflow が exe と SHA-256 を作り、
 GitHub Release に置く。
 
+版を書く所は `Cargo.toml` だけ。exe に埋め込む manifest の版 (`app.manifest` の `assemblyIdentity`) は、build.rs が
+`Cargo.toml` の版から入れる。
+
 ## ライセンス
 
 [MIT](LICENSE)
