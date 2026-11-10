@@ -1,8 +1,8 @@
 //! 秘密の写し (クリップボードの文字から作る打つ列と、1 文字ずつ送るときの値) を、外に残さずに扱う。
 //!
 //! - [`SecretBuf`]: 秘密専用にページ単位で確保した、大きさの決まった buffer。ほかの確保とページを分け合わない。
-//!   Windows では VirtualLock で物理メモリに留め、ページファイルに書き出させない。Drop で上書きしてから、
-//!   ロックを外して手放す。
+//!   Windows では VirtualLock で物理メモリに留め、ページファイルに書き出させない。クラッシュのときに Windows の
+//!   エラー報告 (WER) が取る dump からも外す。Drop で上書きしてから、ロックを外して手放す。
 //! - [`StackLock`]: 今の thread の stack のうち、呼んだ所から下 (これから呼ぶ関数が使う側) と上の全部を、
 //!   同じく物理メモリに留める。1 文字ずつの写し (送る INPUT の並び・decode した文字など) が stack に乗るため。
 //!   Drop で、呼んだ所より下を上書きしてからロックを外す。
@@ -10,6 +10,7 @@
 //!
 //! Windows でないとき (test) は、ページ単位で確保するだけで、物理メモリに留めない (このアプリは Windows でだけ動く)。
 
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -134,9 +135,15 @@ impl Drop for Pages {
     }
 }
 
+thread_local! {
+    /// この thread で [`StackLock`] を持っているか。VirtualLock はロックを数えないので、入れ子にすると内側の
+    /// Drop が外側のロックも外してしまう。入れ子は断る。
+    static STACK_LOCKED: Cell<bool> = const { Cell::new(false) };
+}
+
 /// 今の thread の stack のうち、呼んだ所から下 [`STACK_LOCK_BELOW`] と、上 (呼び出し元の側) の全部を、
 /// 物理メモリに留めている間の印。Drop で、呼んだ所より下を上書きしてからロックを外す。
-/// 留めた thread で手放す (thread をまたげない)。
+/// 留めた thread で手放す (thread をまたげない)。1 つの thread で同時に持てるのは 1 つだけ。
 pub struct StackLock {
     start: usize,
     len: usize,
@@ -145,12 +152,16 @@ pub struct StackLock {
 
 impl StackLock {
     pub fn here() -> Result<StackLock, LockFailed> {
+        if STACK_LOCKED.get() {
+            return Err(LockFailed);
+        }
         // stack は使った所までしか commit されないので、留める範囲より下まで先に使っておく
         scrub_stack();
         let marker = 0u8;
         let here = std::hint::black_box(&marker) as *const u8 as usize;
         let (start, len) =
             sys::lock_stack(here.saturating_sub(STACK_LOCK_BELOW)).ok_or(LockFailed)?;
+        STACK_LOCKED.set(true);
         Ok(StackLock {
             start,
             len,
@@ -163,6 +174,7 @@ impl Drop for StackLock {
     fn drop(&mut self) {
         scrub_stack();
         sys::unlock_stack(self.start, self.len);
+        STACK_LOCKED.set(false);
     }
 }
 
@@ -171,6 +183,9 @@ mod sys {
     use std::ffi::c_void;
     use std::ptr::NonNull;
 
+    use windows::Win32::System::ErrorReporting::{
+        WerRegisterExcludedMemoryBlock, WerUnregisterExcludedMemoryBlock,
+    };
     use windows::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
         VirtualLock, VirtualUnlock,
@@ -181,14 +196,23 @@ mod sys {
     pub const PAGE_ALIGN: usize = 4096;
 
     pub fn alloc_locked(bytes: usize) -> Option<NonNull<u8>> {
+        // WER に登録できる大きさ
+        let size = u32::try_from(bytes).ok()?;
         // SAFETY: 新しい領域を確保するだけ。VirtualAlloc はページ単位 (予約は 64 KB 単位) で確保するので、
         // ほかの確保とページを分け合わない (VirtualUnlock でほかのロックを外さない)
         let base = unsafe { VirtualAlloc(None, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
         let base = NonNull::new(base.cast::<u8>())?;
-        // SAFETY: 確保したばかりの範囲を留める。留められなければ手放す
+        let ptr = base.as_ptr().cast::<c_void>();
+        // SAFETY: 確保したばかりの範囲を留め、WER の dump から外すよう登録する (このプロセスの中だけの登録)。
+        // どちらかができなければ、戻してから手放す
         unsafe {
-            if VirtualLock(base.as_ptr().cast(), bytes).is_err() {
-                let _ = VirtualFree(base.as_ptr().cast(), 0, MEM_RELEASE);
+            if VirtualLock(ptr, bytes).is_err() {
+                let _ = VirtualFree(ptr, 0, MEM_RELEASE);
+                return None;
+            }
+            if WerRegisterExcludedMemoryBlock(ptr, size).is_err() {
+                let _ = VirtualUnlock(ptr, bytes);
+                let _ = VirtualFree(ptr, 0, MEM_RELEASE);
                 return None;
             }
         }
@@ -199,10 +223,12 @@ mod sys {
     ///
     /// `base` と `bytes` は `alloc_locked` が返した範囲で、この後は使わない。
     pub unsafe fn free(base: NonNull<u8>, bytes: usize) {
+        let ptr = base.as_ptr().cast::<c_void>();
         // SAFETY: 呼び手が範囲を保証する
         unsafe {
-            let _ = VirtualUnlock(base.as_ptr().cast(), bytes);
-            let _ = VirtualFree(base.as_ptr().cast(), 0, MEM_RELEASE);
+            let _ = WerUnregisterExcludedMemoryBlock(ptr);
+            let _ = VirtualUnlock(ptr, bytes);
+            let _ = VirtualFree(ptr, 0, MEM_RELEASE);
         }
     }
 
@@ -324,11 +350,23 @@ mod tests {
         scrub_stack();
     }
 
+    #[test]
+    fn nested_stack_lock_is_refused() {
+        let outer = StackLock::here().unwrap();
+        assert!(StackLock::here().is_err());
+        drop(outer);
+        // 外した後は、また持てる
+        drop(StackLock::here().unwrap());
+    }
+
     /// 物理メモリに留めたかを、ページごとの状態 (QueryWorkingSetEx の Locked) で確かめる。
     #[cfg(windows)]
     mod windows_only {
         use std::ffi::c_void;
 
+        use windows::Win32::System::ErrorReporting::{
+            WerRegisterExcludedMemoryBlock, WerUnregisterExcludedMemoryBlock,
+        };
         use windows::Win32::System::ProcessStatus::{
             K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION,
         };
@@ -364,6 +402,22 @@ mod tests {
             for page in 0..3 {
                 assert!(locked(base + page * 4096), "page {page}");
             }
+        }
+
+        #[test]
+        fn secret_buf_is_excluded_from_crash_reports_while_alive() {
+            let buf = SecretBuf::<u64>::with_capacity(16).unwrap();
+            let base = buf.items() as *const c_void;
+            // 登録されていれば外せる。外したら登録し直して、元に戻す
+            // SAFETY: このプロセスの WER の登録を変えるだけ
+            unsafe {
+                WerUnregisterExcludedMemoryBlock(base).unwrap();
+                WerRegisterExcludedMemoryBlock(base, 16 * 8).unwrap();
+            }
+            drop(buf);
+            // 手放した後は登録が無い
+            // SAFETY: 同上
+            assert!(unsafe { WerUnregisterExcludedMemoryBlock(base) }.is_err());
         }
 
         #[test]
