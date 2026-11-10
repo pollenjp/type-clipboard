@@ -108,7 +108,17 @@ pub fn refusal(refusal: &Refusal, mode: Mode) -> Status {
                 Mode::Unicode => "制御文字などは打てません",
             },
         ),
+        Refusal::CannotLockMemory => cannot_lock_memory(),
     }
+}
+
+/// 打つ列か、打つ thread の stack を、物理メモリに留められなかった (打たずに止める)。
+fn cannot_lock_memory() -> Status {
+    Status::new(
+        Kind::Warn,
+        "打つ文字をメモリに留められないので打ちません",
+        "ページファイルに書き出させないためです。長すぎる文字は打てません",
+    )
 }
 
 /// 打っている最中。
@@ -156,6 +166,12 @@ pub fn outcome(outcome: Outcome, typed: usize, total: usize, trial: bool) -> Sta
             Kind::Warn,
             format!("キーを送れませんでした ({typed} / {total})"),
             "打つ先が入力を受け付けませんでした",
+        ),
+        Outcome::CannotLockMemory => cannot_lock_memory(),
+        Outcome::Crashed => Status::new(
+            Kind::Warn,
+            format!("打つ処理が異常終了しました ({typed} / {total})"),
+            "写しは消し、キー入力を止める仕組みも外しました",
         ),
     }
 }
@@ -215,5 +231,16 @@ mod tests {
             refusal(&Refusal::Empty, Mode::Unicode).text,
             "クリップボードに文字がありません"
         );
+    }
+
+    #[test]
+    fn memory_lock_and_crash_texts() {
+        let refused = refusal(&Refusal::CannotLockMemory, Mode::Unicode);
+        assert_eq!(refused.kind, Kind::Warn);
+        assert_eq!(refused.text, "打つ文字をメモリに留められないので打ちません");
+        assert_eq!(outcome(Outcome::CannotLockMemory, 0, 60, false), refused);
+        let crashed = outcome(Outcome::Crashed, 7, 60, false);
+        assert_eq!(crashed.kind, Kind::Warn);
+        assert_eq!(crashed.text, "打つ処理が異常終了しました (7 / 60)");
     }
 }

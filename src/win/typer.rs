@@ -1,4 +1,7 @@
 //! 打つ thread: 打つ先が前に来るのを待ち、IME と修飾キーを確かめてから、1 文字ずつ SendInput で送る。
+//!
+//! 打つ間は、この thread の stack を物理メモリに留める (送る INPUT の並びなど、1 文字ずつの写しが乗るため)。
+//! 打つ処理が panic しても、打つ列は消え、終わりを主窓に知らせる (主窓が hook を外す)。
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -7,8 +10,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use type_clipboard::keymap::SHIFT_SCANCODE;
-use type_clipboard::secret::wipe;
-use type_clipboard::typing::{Outcome, Stroke, Strokes};
+use type_clipboard::secret::{StackLock, wipe};
+use type_clipboard::typing::{Outcome, Stroke, Strokes, run_guarded};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -59,43 +62,59 @@ fn run(job: Job) {
     } = job;
     let target = HWND(target as *mut c_void);
     let notify = HWND(notify as *mut c_void);
-    let (outcome, typed) = type_all(target, notify, &strokes, interval_ms, &abort);
-    // 打ち終わったら (止めたときも) 写しを消してから知らせる
-    drop(strokes);
+    let (outcome, typed) = match StackLock::here() {
+        Ok(stack) => {
+            // 打つ列は work が持ち、打ち終わったら (止めたとき・panic したときも) 消える
+            let finished = run_guarded(move |typed| {
+                type_all(target, notify, &strokes, interval_ms, &abort, typed)
+            });
+            // 呼び終えた関数の frame に残った写しを上書きしてから、ロックを外す
+            drop(stack);
+            finished
+        }
+        Err(_) => {
+            drop(strokes);
+            (Outcome::CannotLockMemory, 0)
+        }
+    };
+    // 写しを消してから知らせる
     post(notify, WM_APP_DONE, outcome.code(), typed as isize);
 }
 
+/// 打つ。打った文字の数を `typed` に書きながら進む。
 fn type_all(
     target: HWND,
     notify: HWND,
     strokes: &Strokes,
     interval_ms: u32,
     abort: &AtomicBool,
-) -> (Outcome, usize) {
+    typed: &mut usize,
+) -> Outcome {
     if let Err(outcome) = wait_for_foreground(target, abort) {
-        return (outcome, 0);
+        return outcome;
     }
     if ime_open(target) == Some(true) {
-        return (Outcome::ImeOn, 0);
+        return Outcome::ImeOn;
     }
     if modifiers_held() {
-        return (Outcome::ModifierHeld, 0);
+        return Outcome::ModifierHeld;
     }
     let interval = Duration::from_millis(u64::from(interval_ms));
-    for (typed, stroke) in strokes.iter().enumerate() {
+    for stroke in strokes.iter() {
         if abort.load(Ordering::SeqCst) {
-            return (Outcome::StoppedByInput, typed);
+            return Outcome::StoppedByInput;
         }
         if foreground() != target {
-            return (Outcome::StoppedByForeground, typed);
+            return Outcome::StoppedByForeground;
         }
         if !send(stroke) {
-            return (Outcome::SendFailed, typed);
+            return Outcome::SendFailed;
         }
-        post(notify, WM_APP_PROGRESS, typed + 1, 0);
+        *typed += 1;
+        post(notify, WM_APP_PROGRESS, *typed, 0);
         std::thread::sleep(interval);
     }
-    (Outcome::Completed, strokes.len())
+    Outcome::Completed
 }
 
 /// 打つ先が前に来て、`SETTLE` だけたつのを待つ。

@@ -9,10 +9,13 @@ use std::thread::JoinHandle;
 
 use type_clipboard::candidate::{Elevation, is_pickable};
 use type_clipboard::geometry::{Rect, unpack_point};
+use type_clipboard::secret::{self, StackLock};
 use type_clipboard::settings::{self, Settings, WindowRect};
 use type_clipboard::status::{self, Kind, Status};
 use type_clipboard::typing::{Mode, Outcome, Refusal, TEST_SAMPLE, plan, typeable_len};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, E_OUTOFMEMORY, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, EndPaint, GetSysColor, GetSysColorBrush, HBRUSH,
     HDC, MONITOR_DEFAULTTONULL, MonitorFromRect, PAINTSTRUCT, SetBkMode, SetTextColor, TRANSPARENT,
@@ -32,13 +35,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DispatchMessageW, GA_ROOT, GWLP_USERDATA, GetAncestor, GetClientRect, GetMessageW,
     GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
-    IsDialogMessageW, IsIconic, IsWindow, KillTimer, LoadCursorW, MINMAXINFO, MSG, PostQuitMessage,
-    RegisterClassExW, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPlacement,
-    SetWindowPos, ShowWindow, TranslateMessage, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE,
-    WM_CLIPBOARDUPDATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_GETMINMAXINFO,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSEXW,
-    WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    IsDialogMessageW, IsIconic, IsWindow, KillTimer, LoadCursorW, MINMAXINFO, MSG, PM_NOREMOVE,
+    PeekMessageW, PostQuitMessage, RegisterClassExW, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, ShowWindow, TranslateMessage, WA_ACTIVE, WINDOWPLACEMENT,
+    WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_GETMINMAXINFO, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SIZE, WM_TIMER,
+    WNDCLASSEXW, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 
@@ -73,6 +76,8 @@ const LIST_SUBCLASS_ID: usize = 1;
 struct Run {
     total: usize,
     trial: bool,
+    /// 打った文字の数 (進み具合の知らせで更新する)
+    typed: usize,
 }
 
 struct App {
@@ -99,10 +104,20 @@ struct App {
     suppress_list: Cell<bool>,
     tracking_list_mouse: Cell<bool>,
     status_kind: Cell<Kind>,
+    /// 秘密に触れた後 (数えた・打つ列を作った・打ち終えた) に、message loop で UI の thread の stack を上書きする
+    scrub_pending: Cell<bool>,
 }
 
 /// 主窓を作り、閉じられるまで message loop を回す。
 pub fn run() -> windows::core::Result<()> {
+    // この thread (UI の thread) の stack のうち使うあたりを、閉じるまで物理メモリに留める。打つ列を作るときに
+    // decode した文字や、打っている間に hook が受け取る (このアプリが送った) キーが乗るため
+    let _stack = StackLock::here().map_err(|_| {
+        windows::core::Error::new(
+            E_OUTOFMEMORY,
+            "UI の thread の stack を物理メモリに留められませんでした",
+        )
+    })?;
     // SAFETY: この thread (UI の thread) で窓を作り、message を回す
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
@@ -143,6 +158,11 @@ pub fn run() -> windows::core::Result<()> {
 
         let mut msg = MSG::default();
         loop {
+            // 秘密に触れた処理 (window procedure と hook) の frame に残った写しを、それらより上の
+            // この loop から上書きする
+            if app.scrub_pending.take() {
+                secret::scrub_stack();
+            }
             let got = GetMessageW(&mut msg, None, 0, 0).0;
             if got == 0 || got == -1 {
                 break;
@@ -268,6 +288,7 @@ impl App {
             suppress_list: Cell::new(false),
             tracking_list_mouse: Cell::new(false),
             status_kind: Cell::new(Kind::Info),
+            scrub_pending: Cell::new(false),
         })
     }
 
@@ -547,13 +568,12 @@ impl App {
     }
 
     fn update_clipboard(&self) {
-        let text = match clipboard::read(self.hwnd) {
-            // 数えたら写しはすぐ消える (SecretText の Drop)
-            ClipText::Text(text) => match typeable_len(text.as_slice()) {
-                0 => "クリップボード: 空".to_string(),
-                n => format!("クリップボード: {n} 文字"),
-            },
-            ClipText::Empty => "クリップボード: 空".to_string(),
+        // 写しは作らず、クリップボードを開いている間に数える
+        let counted = clipboard::with_text(self.hwnd, typeable_len);
+        self.scrub_pending.set(true);
+        let text = match counted {
+            ClipText::Text(0) | ClipText::Empty => "クリップボード: 空".to_string(),
+            ClipText::Text(n) => format!("クリップボード: {n} 文字"),
             ClipText::NotText => "クリップボード: 文字ではない".to_string(),
             ClipText::Busy => return,
         };
@@ -707,8 +727,9 @@ impl App {
         }
     }
 
-    /// 打つ先が閉じたかを見て、サムネイルを窓の今の大きさに合わせる。
+    /// 打つ thread が知らせずに終わっていないか・打つ先が閉じたかを見て、サムネイルを窓の今の大きさに合わせる。
     fn poll(&self) {
+        self.check_worker();
         let alive = |hwnd: Option<HWND>| {
             // SAFETY: 窓があるかを問い合わせるだけ
             hwnd.is_none_or(|hwnd| unsafe { IsWindow(Some(hwnd)) }.as_bool())
@@ -724,6 +745,38 @@ impl App {
             self.set_status(status::target_closed());
         }
         self.place_thumbnail();
+    }
+
+    /// 打つ thread が、終わりを知らせずに終わっていたら (知らせを置く前に panic したなど)、hook を外して知らせる。
+    /// 打つ thread は panic しても知らせるので、ここで拾うのは、それもできなかったときだけ。
+    fn check_worker(&self) {
+        let finished = self
+            .worker
+            .borrow()
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished);
+        if let Some(run) = self.run.get()
+            && finished
+            && !self.done_queued()
+        {
+            self.on_done(Outcome::Crashed.code(), run.typed);
+        }
+    }
+
+    /// 打つ thread の終わりの知らせが、まだ message の列にあるか (終わった thread の知らせは、もう列に入っている)。
+    fn done_queued(&self) -> bool {
+        let mut msg = MSG::default();
+        // SAFETY: 列を覗くだけ (取り出さない)
+        unsafe {
+            PeekMessageW(
+                &mut msg,
+                Some(self.hwnd),
+                WM_APP_DONE,
+                WM_APP_DONE,
+                PM_NOREMOVE,
+            )
+        }
+        .as_bool()
     }
 
     // ---- クリックで選ぶ ----
@@ -856,9 +909,11 @@ impl App {
             let sample: Vec<u16> = TEST_SAMPLE.encode_utf16().collect();
             plan(&sample, mode, layout)
         } else {
-            match clipboard::read(self.hwnd) {
-                // 下ごしらえしたら、写しはこの腕の終わりで消える (SecretText の Drop)
-                ClipText::Text(text) => plan(text.as_slice(), mode, layout),
+            // 写しは作らず、クリップボードを開いている間に打つ列を作る (打つ列は物理メモリに留めたページに置く)
+            let read = clipboard::with_text(self.hwnd, |text| plan(text, mode, layout));
+            self.scrub_pending.set(true);
+            match read {
+                ClipText::Text(planned) => planned,
                 ClipText::Empty | ClipText::NotText => Err(Refusal::Empty),
                 ClipText::Busy => {
                     self.set_status(status::clipboard_busy());
@@ -896,7 +951,11 @@ impl App {
         }
         *self.abort.borrow_mut() = abort.clone();
         let total = strokes.len();
-        self.run.set(Some(Run { total, trial }));
+        self.run.set(Some(Run {
+            total,
+            trial,
+            typed: 0,
+        }));
         self.frame.hide();
         self.ui.enable_inputs(false, mode == Mode::KeyPosition);
         self.ui.set_progress(0, total, PBST_NORMAL);
@@ -925,6 +984,7 @@ impl App {
 
     fn on_progress(&self, typed: usize) {
         if let Some(run) = self.run.get() {
+            self.run.set(Some(Run { typed, ..run }));
             self.ui.set_progress(typed, run.total, PBST_NORMAL);
             self.set_status(status::typing(typed, run.total));
         }
@@ -932,6 +992,8 @@ impl App {
 
     fn on_done(&self, code: usize, typed: usize) {
         self.hooks.borrow_mut().take();
+        // 打っている間に hook が受け取った (このアプリが送った) キーが、この thread の stack に残るので上書きする
+        self.scrub_pending.set(true);
         if let Some(worker) = self.worker.borrow_mut().take() {
             let _ = worker.join();
         }
