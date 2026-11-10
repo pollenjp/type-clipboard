@@ -12,11 +12,17 @@ pub enum Layout {
     Us,
 }
 
-/// 1 文字を打つキーの位置と、Shift を押すか。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 1 文字を打つキーの位置と、Shift を押すか。打つ文字と同じ値になるので、Debug で中身を出さない。
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct KeyStroke {
     pub scancode: u16,
     pub shift: bool,
+}
+
+impl std::fmt::Debug for KeyStroke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyStroke(..)")
+    }
 }
 
 /// 左の Shift の scancode。

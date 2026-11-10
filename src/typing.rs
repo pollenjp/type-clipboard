@@ -31,13 +31,19 @@ impl Mode {
     }
 }
 
-/// 1 文字ぶんの送り方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 1 文字ぶんの送り方。打つ文字と同じ値になるので、Debug で中身を出さない。
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stroke {
     /// このキーの位置を押す (Shift も)
     Key(KeyStroke),
     /// この文字を Unicode で送る (送るときに UTF-16 に直す)
     Unicode(char),
+}
+
+impl std::fmt::Debug for Stroke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Stroke(..)")
+    }
 }
 
 /// 打つ列。中身はクリップボードの文字と同じ値になるので、秘密専用のページに置き、ページファイルに
@@ -330,6 +336,14 @@ mod tests {
         // 容量は UTF-16 の単位の数 (4) で、文字の数 (3) より多い
         assert_eq!(strokes.0.capacity(), 4);
         assert_eq!(format!("{strokes:?}"), "Strokes(3 chars)");
+    }
+
+    #[test]
+    fn debug_of_a_stroke_hides_the_char() {
+        let key = Layout::Us.stroke_for('p').unwrap();
+        assert_eq!(format!("{:?}", Stroke::Key(key)), "Stroke(..)");
+        assert_eq!(format!("{:?}", Stroke::Unicode('p')), "Stroke(..)");
+        assert_eq!(format!("{key:?}"), "KeyStroke(..)");
     }
 
     /// 長すぎる文字は、打つ列を物理メモリに留められないので断る (留めるのは Windows だけ)。
