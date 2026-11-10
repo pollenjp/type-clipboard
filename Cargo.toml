@@ -62,5 +62,7 @@ dbg_macro = "deny"
 use_debug = "deny"
 # mem::forget は Drop を飛ばし、写しを上書きせずに残す
 mem_forget = "deny"
-# clippy.toml に並べた、標準出力・標準エラー・ファイル・デバッガ・イベントログへ書くもの
+# clippy.toml に並べた、外へ書き出すもの (標準出力と標準エラー・ファイル・デバッガ・イベントログ・レジストリ・
+# プロセスを起こす・ネットワーク・ログの crate のマクロ)
 disallowed_methods = "deny"
+disallowed_macros = "deny"

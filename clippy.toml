@@ -1,15 +1,57 @@
-# 打つ文字 (パスワードなど) をログに残さないため、外へ書き出すものを使わせない (Cargo.toml の [lints.clippy] の
-# disallowed_methods)。要る所は、狭い #[expect(clippy::disallowed_methods, reason = "...")] で外す。
-# windows crate の関数は、その feature を足したときにだけ在るので allow-invalid にする。
+# 打つ文字 (パスワードなど) をログに残さず、外へ出さないため、外へ書き出すものを使わせない (Cargo.toml の
+# [lints.clippy] の disallowed_methods・disallowed_macros)。要る所は、狭い #[expect(..., reason = "...")] で外す。
+# windows crate の関数とログの crate は、その feature・crate を足したときにだけ在るので allow-invalid にする。
+# 依存の crate の中で書き出すものと、ここに無い API は止まらない。
 disallowed-methods = [
+    # 標準出力・標準エラー
     { path = "std::io::stdout", reason = "ログを残さない (標準出力に書かない)" },
     { path = "std::io::stderr", reason = "ログを残さない (標準エラーに書かない)" },
+    # ファイル (ディスクに書くのは設定のファイルだけ。settings::save)
     { path = "std::fs::write", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
     { path = "std::fs::File::create", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
     { path = "std::fs::File::create_new", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
     { path = "std::fs::OpenOptions::open", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
+    { path = "windows::Win32::Storage::FileSystem::CreateFileA", reason = "ディスクに書くのは設定のファイルだけ (settings::save)", allow-invalid = true },
+    { path = "windows::Win32::Storage::FileSystem::CreateFileW", reason = "ディスクに書くのは設定のファイルだけ (settings::save)", allow-invalid = true },
+    { path = "windows::Win32::Storage::FileSystem::CreateFile2", reason = "ディスクに書くのは設定のファイルだけ (settings::save)", allow-invalid = true },
+    { path = "windows::Win32::Storage::FileSystem::WriteFile", reason = "ディスクに書くのは設定のファイルだけ (settings::save)", allow-invalid = true },
+    # デバッガ・イベントログ (Error::new は、渡した文を RoOriginateErrorW でデバッガに知らせる)
     { path = "windows::Win32::System::Diagnostics::Debug::OutputDebugStringA", reason = "ログを残さない (デバッガに書かない)", allow-invalid = true },
     { path = "windows::Win32::System::Diagnostics::Debug::OutputDebugStringW", reason = "ログを残さない (デバッガに書かない)", allow-invalid = true },
+    { path = "windows::core::Error::new", reason = "渡した文をデバッガに知らせる (RoOriginateErrorW)。決まった文だけを渡す" },
+    { path = "windows::Win32::System::WinRT::RoOriginateError", reason = "ログを残さない (デバッガに書かない)", allow-invalid = true },
+    { path = "windows::Win32::System::WinRT::RoOriginateErrorW", reason = "ログを残さない (デバッガに書かない)", allow-invalid = true },
     { path = "windows::Win32::System::EventLog::ReportEventA", reason = "ログを残さない (イベントログに書かない)", allow-invalid = true },
     { path = "windows::Win32::System::EventLog::ReportEventW", reason = "ログを残さない (イベントログに書かない)", allow-invalid = true },
+    # レジストリ
+    { path = "windows::Win32::System::Registry::RegSetValueExA", reason = "設定はレジストリに書かない", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegSetValueExW", reason = "設定はレジストリに書かない", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegSetKeyValueA", reason = "設定はレジストリに書かない", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegSetKeyValueW", reason = "設定はレジストリに書かない", allow-invalid = true },
+    # プロセスを起こす (コマンドの引数は Windows の監査に残りうる)
+    { path = "std::process::Command::new", reason = "プロセスを起こさない (引数が監査に残りうる)" },
+    { path = "windows::Win32::System::Threading::CreateProcessA", reason = "プロセスを起こさない (引数が監査に残りうる)", allow-invalid = true },
+    { path = "windows::Win32::System::Threading::CreateProcessW", reason = "プロセスを起こさない (引数が監査に残りうる)", allow-invalid = true },
+    { path = "windows::Win32::UI::Shell::ShellExecuteA", reason = "プロセスを起こさない (引数が監査に残りうる)", allow-invalid = true },
+    { path = "windows::Win32::UI::Shell::ShellExecuteW", reason = "プロセスを起こさない (引数が監査に残りうる)", allow-invalid = true },
+    { path = "windows::Win32::UI::Shell::ShellExecuteExA", reason = "プロセスを起こさない (引数が監査に残りうる)", allow-invalid = true },
+    { path = "windows::Win32::UI::Shell::ShellExecuteExW", reason = "プロセスを起こさない (引数が監査に残りうる)", allow-invalid = true },
+    # ネットワーク
+    { path = "std::net::TcpStream::connect", reason = "ネットワークに送らない" },
+    { path = "std::net::TcpStream::connect_timeout", reason = "ネットワークに送らない" },
+    { path = "std::net::UdpSocket::bind", reason = "ネットワークに送らない" },
+]
+disallowed-macros = [
+    { path = "log::log", reason = "ログを残さない", allow-invalid = true },
+    { path = "log::trace", reason = "ログを残さない", allow-invalid = true },
+    { path = "log::debug", reason = "ログを残さない", allow-invalid = true },
+    { path = "log::info", reason = "ログを残さない", allow-invalid = true },
+    { path = "log::warn", reason = "ログを残さない", allow-invalid = true },
+    { path = "log::error", reason = "ログを残さない", allow-invalid = true },
+    { path = "tracing::event", reason = "ログを残さない", allow-invalid = true },
+    { path = "tracing::trace", reason = "ログを残さない", allow-invalid = true },
+    { path = "tracing::debug", reason = "ログを残さない", allow-invalid = true },
+    { path = "tracing::info", reason = "ログを残さない", allow-invalid = true },
+    { path = "tracing::warn", reason = "ログを残さない", allow-invalid = true },
+    { path = "tracing::error", reason = "ログを残さない", allow-invalid = true },
 ]

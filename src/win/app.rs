@@ -112,6 +112,10 @@ struct App {
 pub fn run() -> windows::core::Result<()> {
     // この thread (UI の thread) の stack のうち使うあたりを、閉じるまで物理メモリに留める。打つ列を作るときに
     // decode した文字や、打っている間に hook が受け取る (このアプリが送った) キーが乗るため
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Error::new に渡すのは決まった文だけ (打つ文字とは関わらない)"
+    )]
     let _stack = StackLock::here().map_err(|_| {
         windows::core::Error::new(
             E_OUTOFMEMORY,
