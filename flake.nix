@@ -50,6 +50,8 @@
               # (初回に Microsoft の CRT と Windows SDK を取ってくる)
               pkgs.cargo-xwin
               pkgs.lld
+              # README の「使い方」の図を作る (python3 docs/images/make_usage_svgs.py)
+              pkgs.python3
             ];
           };
         }
