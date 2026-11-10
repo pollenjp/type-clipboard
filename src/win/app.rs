@@ -747,16 +747,12 @@ impl App {
         self.place_thumbnail();
     }
 
-    /// 打つ thread が、終わりを知らせずに終わっていたら (知らせを置く前に panic したなど)、hook を外して知らせる。
-    /// 打つ thread は panic しても知らせるので、ここで拾うのは、それもできなかったときだけ。
+    /// 打つ thread が、終わりを知らせずに終わっていたら (知らせを置く前に panic した・外から止められたなど)、
+    /// hook を外して知らせる。打つ thread は panic しても知らせるので、ここで拾うのは、それもできなかったときだけ。
     fn check_worker(&self) {
-        let finished = self
-            .worker
-            .borrow()
-            .as_ref()
-            .is_some_and(JoinHandle::is_finished);
+        let exited = self.worker.borrow().as_ref().is_some_and(typer::exited);
         if let Some(run) = self.run.get()
-            && finished
+            && exited
             && !self.done_queued()
         {
             self.on_done(Outcome::Crashed.code(), run.typed);
@@ -995,7 +991,7 @@ impl App {
         // 打っている間に hook が受け取った (このアプリが送った) キーが、この thread の stack に残るので上書きする
         self.scrub_pending.set(true);
         if let Some(worker) = self.worker.borrow_mut().take() {
-            let _ = worker.join();
+            typer::finish(worker);
         }
         let Some(run) = self.run.take() else {
             return;
@@ -1059,7 +1055,7 @@ impl App {
         self.hooks.borrow_mut().take();
         self.abort.borrow().store(true, Ordering::SeqCst);
         if let Some(worker) = self.worker.borrow_mut().take() {
-            let _ = worker.join();
+            typer::finish(worker);
         }
         // SAFETY: 主窓の timer を止める
         unsafe {

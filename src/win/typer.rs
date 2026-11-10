@@ -4,6 +4,7 @@
 //! 打つ処理が panic しても、打つ列は消え、終わりを主窓に知らせる (主窓が hook を外す)。
 
 use std::ffi::c_void;
+use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -12,7 +13,8 @@ use std::time::{Duration, Instant};
 use type_clipboard::keymap::SHIFT_SCANCODE;
 use type_clipboard::secret::{StackLock, wipe};
 use type_clipboard::typing::{Outcome, Stroke, Strokes, run_guarded};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
@@ -34,6 +36,9 @@ const SETTLE: Duration = Duration::from_millis(500);
 const HOLD: Duration = Duration::from_millis(5);
 /// WM_IME_CONTROL の IMC_GETOPENSTATUS (windows crate に無いので置く)。
 const IMC_GETOPENSTATUS: usize = 0x0005;
+/// 打つ thread の stack の大きさ。stack を上書きする `secret::STACK_SCRUB_BYTES` より十分に大きくする
+/// (既定の大きさは環境変数 RUST_MIN_STACK で変わるので、決めておく)。
+const STACK_BYTES: usize = 1024 * 1024;
 
 /// 打つ仕事。HWND は thread をまたげないので isize で持つ。
 pub struct Job {
@@ -49,7 +54,27 @@ pub struct Job {
 pub fn spawn(job: Job) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("typer".to_string())
+        .stack_size(STACK_BYTES)
         .spawn(move || run(job))
+}
+
+/// 打つ thread が終わったか。`JoinHandle::is_finished` は thread の関数が戻ったときだけ true になるので、
+/// 外から止められた thread (TerminateThread) も拾うよう、OS の handle で見る。
+pub fn exited(worker: &JoinHandle<()>) -> bool {
+    let handle = HANDLE(worker.as_raw_handle());
+    // SAFETY: JoinHandle が持つ thread の handle を、待たずに見るだけ
+    let state = unsafe { WaitForSingleObject(handle, 0) };
+    state == WAIT_OBJECT_0
+}
+
+/// 打つ thread を片付ける。ふつうは終わるのを待つ。外から止められた thread は、待つと std の中で panic する
+/// (結果が置かれていない) ので、待たずに手放す。
+pub fn finish(worker: JoinHandle<()>) {
+    if exited(&worker) && !worker.is_finished() {
+        drop(worker);
+    } else {
+        let _ = worker.join();
+    }
 }
 
 fn run(job: Job) {

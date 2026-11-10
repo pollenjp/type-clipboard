@@ -171,7 +171,7 @@ pub fn outcome(outcome: Outcome, typed: usize, total: usize, trial: bool) -> Sta
         Outcome::Crashed => Status::new(
             Kind::Warn,
             format!("打つ処理が異常終了しました ({typed} / {total})"),
-            "写しは消し、キー入力を止める仕組みも外しました",
+            "途中まで入った文字を消してから、打ち直してください",
         ),
     }
 }

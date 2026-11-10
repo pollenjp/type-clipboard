@@ -141,7 +141,7 @@ pub enum Outcome {
     SendFailed,
     /// 打つ thread の stack を物理メモリに留められなかったので、打たずに止めた
     CannotLockMemory,
-    /// 打つ処理が途中で異常終了した (panic など)。写しは消し、hook も外した
+    /// 打つ処理が途中で異常終了した (panic・知らせずに終わった)。主窓は hook を外す
     Crashed,
 }
 
