@@ -766,7 +766,7 @@ def app(m: Motion, sc: Scene) -> str:
     y += 46
     out.append(text(CX, y + 16, "打つ先の配列", "t13"))
     out.append(f'<rect x="760.5" y="{y + 0.5}" width="139" height="23" rx="3" fill="#fff" stroke="#a6abb3"/>')
-    out.append(text(768, y + 16, "日本語 (JIS)", "t13"))
+    out.append(text(768, y + 16, "英語 (US)", "t13"))  # 既定の配列 (src/settings.rs の DEFAULT_LAYOUT)
     out.append(f'<path d="M884,{y + 10}l4,4l4,-4" fill="none" stroke="#444" stroke-width="1.3"/>')
     out.append("</g>")
     y += 29
