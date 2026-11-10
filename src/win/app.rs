@@ -9,7 +9,6 @@ use std::thread::JoinHandle;
 
 use type_clipboard::candidate::{Elevation, is_pickable};
 use type_clipboard::geometry::{Rect, unpack_point};
-use type_clipboard::keymap::Layout;
 use type_clipboard::settings::{self, Settings, WindowRect};
 use type_clipboard::status::{self, Kind, Status};
 use type_clipboard::typing::{Mode, Outcome, Refusal, TEST_SAMPLE, plan, typeable_len};
@@ -26,7 +25,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -236,17 +235,6 @@ fn hiword(value: usize) -> u16 {
     ((value >> 16) & 0xFFFF) as u16
 }
 
-/// 手元の Windows の今の配列 (日本語なら JIS、ほかは US)。
-fn local_layout() -> Layout {
-    // SAFETY: この thread の入力の言語を読むだけ
-    let language = unsafe { GetKeyboardLayout(0) }.0 as usize & 0xFFFF;
-    if language & 0x3FF == 0x11 {
-        Layout::Jis
-    } else {
-        Layout::Us
-    }
-}
-
 impl App {
     fn new(
         hwnd: HWND,
@@ -297,8 +285,7 @@ impl App {
         let mode_is_key = saved.mode == Mode::KeyPosition;
         ui::set_checked(self.ui.mode_key, mode_is_key);
         ui::set_checked(self.ui.mode_unicode, !mode_is_key);
-        self.ui
-            .select_layout(saved.layout.unwrap_or_else(local_layout));
+        self.ui.select_layout(saved.layout);
         self.ui.enable_layout(mode_is_key);
         self.ui.set_interval(saved.interval_ms);
         ui::set_checked(self.ui.topmost, saved.always_on_top);
@@ -1046,7 +1033,7 @@ impl App {
             });
         let settings = Settings {
             mode: self.mode(),
-            layout: Some(self.ui.selected_layout()),
+            layout: self.ui.selected_layout(),
             interval_ms: self.ui.interval_ms(),
             always_on_top: ui::is_checked(self.ui.topmost),
             window,

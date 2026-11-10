@@ -383,7 +383,7 @@ impl Controls {
         usize::try_from(index)
             .ok()
             .and_then(|i| Layout::ALL.get(i).copied())
-            .unwrap_or(Layout::Jis)
+            .unwrap_or(type_clipboard::settings::DEFAULT_LAYOUT)
     }
 
     pub fn select_layout(&self, layout: Layout) {
