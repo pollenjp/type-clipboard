@@ -102,18 +102,20 @@
 - 文字 (CF_UNICODETEXT) を読み、文字数だけを出す。クリップボードが変わったという知らせを受けて数え直す。
 - 中身は画面・ログ・設定に出さない。打ち終わったら (止めたときも) 手元の写しを消す。
 - 写しが外 (ページファイル・クラッシュの dump・ログ) に残らないよう、次のようにする (2026-11-10 に書き足した)。
-  - 文字数を数えるときも、打つ列を作るときも、クリップボードの中身はこのアプリの側に写さず、クリップボードを開いている間に読む。
-  - 打つ列 (打つ文字を、送るキーに直したもの) は、秘密専用にページ単位で確保したメモリ (VirtualAlloc) に置き、VirtualLock で物理メモリに留めて、ページファイルに書き出させない。ページをほかの確保と分け合わないので、ロックを外してもほかのロックは外れない。打ち終わったら (止めたとき・異常終了したときも) 上書きしてから、ロックを外して手放す。
-  - 1 文字ずつの写しが乗る stack も物理メモリに留め、使い終えたら上書きする。打つ thread (送る INPUT の並びと UTF-16 の単位) は打つ間、UI の thread (打つ列を作るときに decode した文字と、打っている間に hook が受け取る、このアプリが送ったキー) は起動から閉じるまで留める。
+  - 文字数を数えるときも、打つ列を作るときも、このアプリのコードはクリップボードの中身を写さず、Windows が渡す中身をクリップボードを開いている間に読む (Windows がこのアプリのメモリに置く写しは、防げないものに挙げる)。
+  - 打つ列 (打つ文字を、送るキーに直したもの) は、秘密専用にページ単位で確保したメモリ (VirtualAlloc) に置き、VirtualLock で物理メモリに留めて、ページファイルに書き出させない (Microsoft の文書は、留めている間はページファイルに書き出さないとしている)。ページをほかの確保と分け合わないので、ロックを外してもほかのロックは外れない。打ち終わったら (止めたとき・panic したときも) 上書きしてから、ロックを外して手放す。
+  - 1 文字ずつの写しが乗る stack も物理メモリに留め、使い終えたら上書きする。打つ thread (送る INPUT の並びと UTF-16 の単位) は打つ間、UI の thread (打つ列を作るときに decode した文字と、打っている間に hook が受け取る、このアプリが送ったキー) は起動から閉じるまで留める。VirtualLock はロックを数えないので、1 つの thread で入れ子には留めない。
   - 物理メモリに留められないときは打たない。打つ列を置けないとき (長すぎる文字など) と、打つ thread の stack を留められないときは打たずに断り、UI の thread の stack を留められないときは起動しない。パスワードの長さなら、作業セットの上限 (留められるページの数) には届かない。
-  - クラッシュや応答なしで Windows のエラー報告 (WER) が dump を取るとき、heap を入れない (WerSetFlags の WER_FAULT_REPORTING_FLAG_NOHEAP)。起動のすぐ後に、このプロセスにだけ当てる。レジストリなど、プロセスの外に残る設定は変えない。
-  - 打つ thread が panic しても、打つ列を消し、hook を外して、その旨を出す (panic は unwind のままにし、打つ thread で受け止める)。知らせずに終わった打つ thread も、主窓が見回って拾う。panic の文は標準エラーにも書かない。
-  - ログを出す書き方を足すと、clippy の lint で CI が止まる (§5.7)。
+  - クラッシュや応答なしで Windows のエラー報告 (WER) が dump を取るとき、heap を入れない (WerSetFlags の WER_FAULT_REPORTING_FLAG_NOHEAP)。起動のすぐ後に、このプロセスにだけ当てる。打つ列のページも、dump から外すよう登録する (WerRegisterExcludedMemoryBlock。このプロセスの中だけの登録)。レジストリなど、プロセスの外に残る設定は変えない。
+  - 打つ thread が panic しても、打つ列を消し、hook を外して、その旨を出す (panic は unwind のままにし、打つ thread で受け止める)。知らせずに終わった打つ thread (外から止められたものも) は、主窓が見回って拾い、hook を外す。panic の文は標準エラーにも書かない。
+  - 外へ書き出す書き方を足すと、clippy の lint で CI が止まる (§5.7)。
 - このアプリでは防げないもの (2026-11-10 に書き足した):
   - 打つ先の側。受け取った文字の扱い (リモートの先の OS やアプリ)、途中の経路、ほかのアプリのキーボードの hook。
-  - クリップボードそのもの。Windows が持つ中身 (このアプリが読むときに、Windows がこのアプリのメモリに置く写しを含む)、クリップボードの履歴 (Win+V)、ほかの端末との同期、クリップボードを読むほかのアプリ。
+  - クリップボードそのもの。Windows が持つ中身、クリップボードの履歴 (Win+V)、ほかの端末との同期、クリップボードを読むほかのアプリ。
+    - このアプリが読むたびに (クリップボードが変わって文字数を数え直すたびにも)、Windows がこのアプリのメモリ (heap) に中身の写しを置く (GetClipboardData)。この写しは、このアプリでは留めることも上書きすることもできず、ページファイルに書き出されうる。いつ手放されるかも Windows が決める。
   - 休止状態のファイル (hiberfil.sys) と、メモリ全体を書き出すもの (システムのクラッシュの完全なダンプなど)。物理メモリに留めたページも書き出される。
-  - 同じユーザーのほかのプロセス・管理者・デバッガ。このアプリのメモリを読め、dump も取れる。管理者が設定した dump の取り方 (WER の LocalDumps など) が heap を除くかも、このアプリでは決められない。
+  - WER の dump に入る stack と register。heap を除いても入る。打っている最中にクラッシュすると、そのとき送っていた 1 文字ぶんの値 (打つ thread の INPUT の並び、UI の thread の hook が受け取ったキー) が入りうる。Rust の panic は受け止めるので、クラッシュは abort・アクセス違反・stack の溢れのときだけ。
+  - 同じユーザーのほかのプロセス・管理者・デバッガ。このアプリのメモリを読め、dump も取れる。管理者が設定した dump の取り方 (WER の LocalDumps など) が heap を除くかも、このアプリでは決められない。外から止められた打つ thread の写しも消せない。
   - CPU の register と OS の側 (kernel) に一時的に乗る、1 文字ぶんの値。
 
 ### 5.5 設定
@@ -137,7 +139,7 @@
 - tag (v*) を push したら、exe を GitHub Release に置く workflow を用意する。tag を打つのは作者で、初版の PR では打たない。
 - Actions は commit の SHA で固定し、版をコメントで添える。GITHUB_TOKEN の権限は既定で contents: read にし、Release の job だけ contents: write にする。
 - 手元 (WSL) からも nix flake の devShell で Windows の exe を作れるようにする (cross)。target と toolchain の取り方は作り手に任せる。
-- ログを出す書き方を、clippy の lint で deny にする (Cargo.toml の [lints.clippy] と clippy.toml。2026-11-10 に書き足した)。print_stdout・print_stderr・dbg_macro・use_debug (write! の Debug の書式)・mem_forget (写しを上書きせずに残す)・disallowed_methods (標準出力と標準エラー・設定でないファイルへの書き込み・OutputDebugString・ReportEvent)。要る所 (Windows でないときの main の 1 行・設定のファイルへの書き込み) は、狭い #[expect] とわけで外す。
+- 外へ書き出す書き方を、clippy の lint で deny にする (Cargo.toml の [lints.clippy] と clippy.toml。2026-11-10 に書き足した)。print_stdout・print_stderr・dbg_macro・use_debug (write! の Debug の書式。format! は見ない)・mem_forget (写しを上書きせずに残す)・disallowed_methods (標準出力と標準エラー・設定でないファイルへの書き込み (std と Win32)・OutputDebugString・RoOriginateError と windows::core::Error::new・ReportEvent・レジストリへの書き込み・プロセスを起こす・ネットワーク)・disallowed_macros (log と tracing の crate のマクロ)。要る所 (Windows でないときの main の 1 行・設定のファイルへの書き込み・決まった文を渡す Error::new) は、狭い #[expect] とわけで外す。依存の crate の中で書き出すものと、clippy.toml に無い API は止まらない。打つ文字と同じ値になる型 (Stroke・KeyStroke) の Debug は、中身を出さない。
 
 ### 5.8 ライセンスと文書
 
@@ -153,7 +155,7 @@
   - JIS と US の表で、ASCII の印字できる文字 (0x20〜0x7E) がすべてキーの位置と Shift に直せる。
   - 直せない文字を見つけられる。
   - 末尾の改行を落とし、途中の改行・タブを断る。
-  - Windows の上で、秘密の写しを置くページと stack が物理メモリに留まる (QueryWorkingSetEx の Locked)。長すぎる文字は留められず断る。WER の dump から heap を除く flag が立つ。打つ処理の panic を受け止める (2026-11-10 に書き足した)。
+  - Windows の上で、秘密の写しを置くページと stack が物理メモリに留まる (QueryWorkingSetEx の Locked)。打つ列のページは、生きている間だけ WER の dump から外す登録がある。長すぎる文字は留められず断る。WER の dump から heap を除く flag が立つ。打つ処理の panic を受け止める (2026-11-10 に書き足した)。
 - 手で確かめる (merge の前に作者が):
   - メモ帳に試し打ち (JIS・US)。
   - VMConnect の拡張セッションのサインイン画面・RDP のサインイン画面・ブラウザの VNC コンソールにパスワードを打つ。
