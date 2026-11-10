@@ -8,7 +8,8 @@ mod win;
 
 #[cfg(windows)]
 fn main() {
-    if let Err(e) = win::run() {
+    // クリップボードに触れる前に、写しがプロセスの外に出る経路を閉じてから、窓を出す
+    if let Err(e) = win::harden().and_then(|()| win::run()) {
         win::show_fatal(&e);
         std::process::exit(1);
     }
