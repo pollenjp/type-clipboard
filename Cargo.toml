@@ -19,6 +19,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_DataExchange",
+    "Win32_System_ErrorReporting",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
@@ -33,6 +34,11 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+# test でだけ: 秘密のページが物理メモリに留まっているかを確かめる (QueryWorkingSetEx)
+[target.'cfg(windows)'.dev-dependencies.windows]
+version = "0.62.2"
+features = ["Win32_System_ProcessStatus"]
+
 [build-dependencies]
 # manifest (comctl32 v6・Per-Monitor V2 の DPI) を exe に埋め込む。rc.exe などの外部の道具が要らない
 embed-manifest = "1.5.1"
@@ -41,3 +47,22 @@ embed-manifest = "1.5.1"
 lto = true
 codegen-units = 1
 strip = true
+# abort にしない。打つ thread が panic したとき、unwinding の Drop で打つ列を消し、主窓に知らせて hook を
+# 外してもらうため (typing::run_guarded)
+panic = "unwind"
+
+# 打つ文字 (パスワードなど) をログに残さないため、外へ書き出す書き方を使わせない。CI の clippy (-D warnings) で
+# 止まる。どうしても要る所は、狭い #[expect(..., reason = "...")] で外す
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+# write!・writeln! で Debug の書式 ({:?}) を使わせない (中身を書き出しうる。format! は見ない)。
+# test の中では使ってよい (lib.rs と main.rs の cfg_attr)
+use_debug = "deny"
+# mem::forget は Drop を飛ばし、写しを上書きせずに残す
+mem_forget = "deny"
+# clippy.toml に並べた、外へ書き出すもの (標準出力と標準エラー・ファイル・デバッガ・イベントログ・レジストリ・
+# プロセスを起こす・ネットワーク・ログの crate のマクロ)
+disallowed_methods = "deny"
+disallowed_macros = "deny"

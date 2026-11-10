@@ -129,6 +129,10 @@ pub fn load(path: &Path) -> Settings {
 }
 
 /// 親の dir が無ければ作ってから書く。
+#[expect(
+    clippy::disallowed_methods,
+    reason = "ディスクに書くのは、この設定のファイル (打ち方・配列・間隔・常に手前・窓の位置) だけ"
+)]
 pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

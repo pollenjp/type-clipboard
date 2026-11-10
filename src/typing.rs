@@ -1,9 +1,10 @@
 //! 打つ文字の下ごしらえ: 末尾の改行を落とし、打たずに断る条件を見て、打つ列 (`Strokes`) を作る。
 
 use std::ops::Deref;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::keymap::{KeyStroke, Layout};
-use crate::secret::wipe;
+use crate::secret::{LockFailed, SecretBuf};
 
 /// 打ち方。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,8 +31,8 @@ impl Mode {
     }
 }
 
-/// 1 文字ぶんの送り方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 1 文字ぶんの送り方。打つ文字と同じ値になるので、Debug で中身を出さない。
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stroke {
     /// このキーの位置を押す (Shift も)
     Key(KeyStroke),
@@ -39,20 +40,21 @@ pub enum Stroke {
     Unicode(char),
 }
 
-/// 打つ列。Drop で上書きして消す (中身はクリップボードの文字と同じ値になるため)。
-pub struct Strokes(Vec<Stroke>);
+impl std::fmt::Debug for Stroke {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Stroke(..)")
+    }
+}
+
+/// 打つ列。中身はクリップボードの文字と同じ値になるので、秘密専用のページに置き、ページファイルに
+/// 書き出させない (`SecretBuf`)。Drop で上書きして消す。
+pub struct Strokes(SecretBuf<Stroke>);
 
 impl Deref for Strokes {
     type Target = [Stroke];
 
     fn deref(&self) -> &[Stroke] {
         &self.0
-    }
-}
-
-impl Drop for Strokes {
-    fn drop(&mut self) {
-        wipe(&mut self.0, Stroke::Unicode('\0'));
     }
 }
 
@@ -71,6 +73,8 @@ pub enum Refusal {
     LineBreakOrTab,
     /// 打てない文字がある (選んだ配列に無い・制御文字・壊れた UTF-16)
     Unsupported { count: usize },
+    /// 打つ列を置くメモリを、物理メモリに留められなかった (長すぎる文字など)
+    CannotLockMemory,
 }
 
 /// 試し打ちの見本: 英字の大文字と小文字・数字・ASCII の記号の一通り。
@@ -103,8 +107,9 @@ pub fn plan(text: &[u16], mode: Mode, layout: Layout) -> Result<Strokes, Refusal
     if text.iter().any(|&unit| matches!(unit, CR | LF | TAB)) {
         return Err(Refusal::LineBreakOrTab);
     }
-    // UTF-16 の単位の数 >= 文字の数なので、伸ばし直さない (写しを残さない)
-    let mut strokes = Strokes(Vec::with_capacity(text.len()));
+    // UTF-16 の単位の数 >= 文字の数なので、容量はこれで足りる (伸ばし直しで写しを残さない)
+    let mut strokes =
+        SecretBuf::with_capacity(text.len()).map_err(|LockFailed| Refusal::CannotLockMemory)?;
     let mut unsupported = 0;
     for decoded in char::decode_utf16(text.iter().copied()) {
         let stroke = match (decoded, mode) {
@@ -113,14 +118,14 @@ pub fn plan(text: &[u16], mode: Mode, layout: Layout) -> Result<Strokes, Refusal
             _ => None,
         };
         match stroke {
-            Some(stroke) => strokes.0.push(stroke),
+            Some(stroke) => strokes.push(stroke),
             None => unsupported += 1,
         }
     }
     if unsupported > 0 {
         return Err(Refusal::Unsupported { count: unsupported });
     }
-    Ok(strokes)
+    Ok(Strokes(strokes))
 }
 
 /// 打ち終わり・止まったわけ。打つ thread から UI の thread へ WPARAM に載せて送る。
@@ -140,10 +145,14 @@ pub enum Outcome {
     ModifierHeld,
     /// キーを送れなかった (SendInput が受け付けなかった)
     SendFailed,
+    /// 打つ thread の stack を物理メモリに留められなかったので、打たずに止めた
+    CannotLockMemory,
+    /// 打つ処理が途中で異常終了した (panic・知らせずに終わった)。主窓は hook を外す
+    Crashed,
 }
 
 impl Outcome {
-    pub const ALL: [Outcome; 7] = [
+    pub const ALL: [Outcome; 9] = [
         Outcome::Completed,
         Outcome::StoppedByInput,
         Outcome::StoppedByForeground,
@@ -151,6 +160,8 @@ impl Outcome {
         Outcome::ImeOn,
         Outcome::ModifierHeld,
         Outcome::SendFailed,
+        Outcome::CannotLockMemory,
+        Outcome::Crashed,
     ];
 
     pub fn code(self) -> usize {
@@ -160,6 +171,17 @@ impl Outcome {
     pub fn from_code(code: usize) -> Option<Outcome> {
         Self::ALL.into_iter().find(|outcome| outcome.code() == code)
     }
+}
+
+/// 打つ処理 `work` を走らせ、終わり方と打った文字の数を返す。`work` が panic したら `Outcome::Crashed` にする
+/// (UI に知らせて hook を外してもらうため)。
+///
+/// `work` には、打った文字の数を書く場所を渡す (panic したときも、そこまでの数を返すため)。`work` が持つ写し
+/// (打つ列) は、panic したときも unwinding の Drop で消える。release の build も panic は unwind のままにする。
+pub fn run_guarded(work: impl FnOnce(&mut usize) -> Outcome) -> (Outcome, usize) {
+    let mut typed = 0;
+    let finished = catch_unwind(AssertUnwindSafe(|| work(&mut typed)));
+    (finished.unwrap_or(Outcome::Crashed), typed)
 }
 
 #[cfg(test)]
@@ -306,5 +328,68 @@ mod tests {
             assert_eq!(Outcome::from_code(outcome.code()), Some(outcome));
         }
         assert_eq!(Outcome::from_code(usize::MAX), None);
+    }
+
+    #[test]
+    fn strokes_fit_without_growing_and_debug_shows_only_the_count() {
+        let strokes = plan(&u("pw😀"), Mode::Unicode, Layout::Us).unwrap();
+        // 容量は UTF-16 の単位の数 (4) で、文字の数 (3) より多い
+        assert_eq!(strokes.0.capacity(), 4);
+        assert_eq!(format!("{strokes:?}"), "Strokes(3 chars)");
+    }
+
+    #[test]
+    fn debug_of_a_stroke_hides_the_char() {
+        let key = Layout::Us.stroke_for('p').unwrap();
+        assert_eq!(format!("{:?}", Stroke::Key(key)), "Stroke(..)");
+        assert_eq!(format!("{:?}", Stroke::Unicode('p')), "Stroke(..)");
+        assert_eq!(format!("{key:?}"), "KeyStroke(..)");
+    }
+
+    /// 長すぎる文字は、打つ列を物理メモリに留められないので断る (留めるのは Windows だけ)。
+    #[cfg(windows)]
+    #[test]
+    fn too_long_text_is_refused_because_it_cannot_be_locked() {
+        // 打つ列は 1 文字 8 byte なので 32 MB。作業セットの上限 (既定) を大きく超える
+        let text = vec![u16::from(b'a'); 4 * 1024 * 1024];
+        assert_eq!(
+            plan(&text, Mode::Unicode, Layout::Us).err(),
+            Some(Refusal::CannotLockMemory)
+        );
+    }
+
+    #[test]
+    fn run_guarded_passes_the_outcome_through() {
+        let finished = run_guarded(|typed| {
+            *typed = 5;
+            Outcome::Completed
+        });
+        assert_eq!(finished, (Outcome::Completed, 5));
+    }
+
+    #[test]
+    fn run_guarded_turns_a_panic_into_crashed_and_keeps_the_count() {
+        let finished = run_guarded(|typed| {
+            *typed = 3;
+            panic!("打つ処理の途中で panic した");
+        });
+        assert_eq!(finished, (Outcome::Crashed, 3));
+    }
+
+    #[test]
+    fn run_guarded_drops_what_the_work_owns_even_on_panic() {
+        struct Owned<'a>(&'a std::cell::Cell<bool>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = std::cell::Cell::new(false);
+        let owned = Owned(&dropped);
+        let _ = run_guarded(move |_| {
+            let _owned = owned;
+            panic!("打つ処理の途中で panic した");
+        });
+        assert!(dropped.get());
     }
 }
