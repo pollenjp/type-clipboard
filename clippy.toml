@@ -1,0 +1,15 @@
+# 打つ文字 (パスワードなど) をログに残さないため、外へ書き出すものを使わせない (Cargo.toml の [lints.clippy] の
+# disallowed_methods)。要る所は、狭い #[expect(clippy::disallowed_methods, reason = "...")] で外す。
+# windows crate の関数は、その feature を足したときにだけ在るので allow-invalid にする。
+disallowed-methods = [
+    { path = "std::io::stdout", reason = "ログを残さない (標準出力に書かない)" },
+    { path = "std::io::stderr", reason = "ログを残さない (標準エラーに書かない)" },
+    { path = "std::fs::write", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
+    { path = "std::fs::File::create", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
+    { path = "std::fs::File::create_new", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
+    { path = "std::fs::OpenOptions::open", reason = "ディスクに書くのは設定のファイルだけ (settings::save)" },
+    { path = "windows::Win32::System::Diagnostics::Debug::OutputDebugStringA", reason = "ログを残さない (デバッガに書かない)", allow-invalid = true },
+    { path = "windows::Win32::System::Diagnostics::Debug::OutputDebugStringW", reason = "ログを残さない (デバッガに書かない)", allow-invalid = true },
+    { path = "windows::Win32::System::EventLog::ReportEventA", reason = "ログを残さない (イベントログに書かない)", allow-invalid = true },
+    { path = "windows::Win32::System::EventLog::ReportEventW", reason = "ログを残さない (イベントログに書かない)", allow-invalid = true },
+]
