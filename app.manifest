@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-  <assemblyIdentity type="win32" name="type-clipboard" version="0.2.0.0" processorArchitecture="amd64"/>
+  <!-- version は、build.rs が Cargo.toml の版 (major.minor.patch.0) に置き換えてから exe に埋め込む -->
+  <assemblyIdentity type="win32" name="type-clipboard" version="@VERSION@" processorArchitecture="amd64"/>
   <description>type-clipboard</description>
   <!-- コントロールの見た目を今の Windows のものにする (comctl32 v6) -->
   <dependency>
