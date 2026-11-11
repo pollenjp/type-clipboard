@@ -3,6 +3,7 @@
 //! - [`SecretBuf`]: 秘密専用にページ単位で確保した、大きさの決まった buffer。ほかの確保とページを分け合わない。
 //!   Windows では VirtualLock で物理メモリに留め、ページファイルに書き出させない。クラッシュのときに Windows の
 //!   エラー報告 (WER) が取る dump からも外す。Drop で上書きしてから、ロックを外して手放す。
+//! - [`SecretCell`]: 秘密の値を 1 つだけ置く、[`SecretBuf`] と同じ扱いの場所。置き換えられる。
 //! - [`StackLock`]: 今の thread の stack のうち、呼んだ所から下 (これから呼ぶ関数が使う側) と上の全部を、
 //!   同じく物理メモリに留める。1 文字ずつの写し (送る INPUT の並び・decode した文字など) が stack に乗るため。
 //!   Drop で、呼んだ所より下を上書きしてからロックを外す。
@@ -106,6 +107,36 @@ impl<T: Copy> Deref for SecretBuf<T> {
 impl<T: Copy> std::fmt::Debug for SecretBuf<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SecretBuf({} items)", self.len)
+    }
+}
+
+/// 秘密の値を 1 つだけ置く場所。[`SecretBuf`] と同じく、秘密専用のページに置いて物理メモリに留め、Drop で上書き
+/// してから手放す。
+pub struct SecretCell<T: Copy>(SecretBuf<T>);
+
+impl<T: Copy> SecretCell<T> {
+    /// `value` を置く場所を、秘密専用のページに確保して物理メモリに留める。
+    pub fn new(value: T) -> Result<Self, LockFailed> {
+        let mut buf = SecretBuf::with_capacity(1)?;
+        buf.push(value);
+        Ok(SecretCell(buf))
+    }
+
+    pub fn get(&self) -> T {
+        self.0[0]
+    }
+
+    /// 置いている値を `value` で上書きする。最適化で書き込みが消されないよう volatile に書く。
+    pub fn set(&mut self, value: T) {
+        // SAFETY: new で 1 つ書いた、確保した範囲の先頭。T の整列より大きい単位で揃っている
+        unsafe { self.0.items().write_volatile(value) };
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+impl<T: Copy> std::fmt::Debug for SecretCell<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretCell(..)")
     }
 }
 
@@ -344,6 +375,23 @@ mod tests {
     }
 
     #[test]
+    fn secret_cell_keeps_the_value_last_set() {
+        let mut cell = SecretCell::new(Some(0x1Eu32)).unwrap();
+        assert_eq!(cell.get(), Some(0x1E));
+        cell.set(Some(0x30));
+        assert_eq!(cell.get(), Some(0x30));
+        cell.set(None);
+        assert_eq!(cell.get(), None);
+    }
+
+    #[test]
+    fn secret_cell_starts_on_its_own_page_and_hides_the_value() {
+        let cell = SecretCell::new(0x1Eu32).unwrap();
+        assert_eq!(cell.0.items() as usize % sys::PAGE_ALIGN, 0);
+        assert_eq!(format!("{cell:?}"), "SecretCell(..)");
+    }
+
+    #[test]
     fn stack_lock_can_be_taken_and_released() {
         let lock = StackLock::here().unwrap();
         drop(lock);
@@ -402,6 +450,12 @@ mod tests {
             for page in 0..3 {
                 assert!(locked(base + page * 4096), "page {page}");
             }
+        }
+
+        #[test]
+        fn the_page_of_a_secret_cell_is_locked() {
+            let cell = SecretCell::new(0u64).unwrap();
+            assert!(locked(cell.0.items() as usize));
         }
 
         #[test]
