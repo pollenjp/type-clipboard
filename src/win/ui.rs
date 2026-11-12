@@ -24,11 +24,12 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::SystemParametersInfoForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL, ES_NUMBER,
-    GetWindowTextW, HMENU, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE,
-    SWP_NOZORDER, SendMessageW, SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_SETFONT, WS_CHILD, WS_EX_CLIENTEDGE, WS_GROUP, WS_TABSTOP, WS_VISIBLE,
+    AppendMenuW, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_PUSHBUTTON,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateMenu, CreatePopupMenu,
+    CreateWindowExW, ES_AUTOHSCROLL, ES_NUMBER, GetWindowTextW, HMENU, MF_POPUP, MF_STRING,
+    NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETFONT, WS_CHILD,
+    WS_EX_CLIENTEDGE, WS_GROUP, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -43,6 +44,9 @@ pub const ID_INTERVAL_SPIN: u16 = 108;
 pub const ID_TOPMOST: u16 = 109;
 pub const ID_TYPE: u16 = 110;
 pub const ID_TRIAL: u16 = 111;
+/// メニューの「バージョン情報」。子の窓の id とも、IsDialogMessage が Enter・Esc で送る IDOK・IDCANCEL (1・2) とも
+/// 重ねない (重ねると、そのボタンやキーでも開く)。
+pub const ID_ABOUT: u16 = 201;
 const ID_STATIC: u16 = 0xFFFF;
 
 /// 候補 (橙)
@@ -119,6 +123,26 @@ fn place(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
             SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
+}
+
+/// 主窓のメニューの帯: 「ヘルプ」の中に「バージョン情報」。窓に付けたメニューは、窓と一緒に消える。
+pub fn menu_bar() -> windows::core::Result<HMENU> {
+    let help_text = wide("ヘルプ(&H)");
+    let about_text = wide("バージョン情報(&A)");
+    // SAFETY: メニューを作って項目を足すだけ。文字列は呼ぶ間だけ生きていればよい。作れなければ起動しないので、
+    // 途中まで作ったメニューは消さない (プロセスと一緒に消える)
+    unsafe {
+        let help = CreatePopupMenu()?;
+        AppendMenuW(
+            help,
+            MF_STRING,
+            usize::from(ID_ABOUT),
+            PCWSTR(about_text.as_ptr()),
+        )?;
+        let bar = CreateMenu()?;
+        AppendMenuW(bar, MF_POPUP, help.0 as usize, PCWSTR(help_text.as_ptr()))?;
+        Ok(bar)
+    }
 }
 
 /// 主窓のコントロール。

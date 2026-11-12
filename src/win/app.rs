@@ -26,24 +26,25 @@ use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIS_SELECTED, LVN_ITEMCHANGED, NMHDR, NMLISTVIEW,
     PBST_NORMAL, PBST_PAUSED, WM_MOUSELEAVE,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetFocus, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DispatchMessageW, GA_ROOT, GWLP_USERDATA, GetAncestor, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
-    IsDialogMessageW, IsIconic, IsWindow, KillTimer, LoadCursorW, MINMAXINFO, MSG, PM_NOREMOVE,
-    PeekMessageW, PostQuitMessage, RegisterClassExW, SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, ShowWindow, TranslateMessage, WA_ACTIVE, WINDOWPLACEMENT,
-    WM_ACTIVATE, WM_CLIPBOARDUPDATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    DispatchMessageW, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetAncestor, GetClientRect,
+    GetMessageW, GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
+    IsDialogMessageW, IsIconic, IsWindow, KillTimer, LoadCursorW, MB_ICONINFORMATION, MB_OK,
+    MINMAXINFO, MSG, MessageBoxW, PM_NOREMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    SW_RESTORE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow,
+    TranslateMessage, WA_ACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_ACTIVATE,
+    WM_CLIPBOARDUPDATE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP,
     WM_GETMINMAXINFO, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SIZE, WM_TIMER,
     WNDCLASSEXW, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use super::clipboard::{self, ClipText};
 use super::frame::Frame;
@@ -143,6 +144,8 @@ pub fn run() -> windows::core::Result<()> {
             .map(settings::load)
             .unwrap_or_default();
         let dpi = GetDpiForSystem();
+        // メニューの帯は窓を作るときに付ける (並べる前から、client の領域がメニューの帯の下になる)
+        let menu = ui::menu_bar()?;
         let hwnd = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             CLASS_NAME,
@@ -153,7 +156,7 @@ pub fn run() -> windows::core::Result<()> {
             scale(400, dpi),
             scale(800, dpi),
             None,
-            None,
+            Some(menu),
             Some(instance),
             None,
         )?;
@@ -368,13 +371,20 @@ impl App {
             WM_GETMINMAXINFO => {
                 // SAFETY: lparam は MINMAXINFO を指す
                 let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
-                let dpi = self.dpi.get();
                 info.ptMinTrackSize = POINT {
-                    x: scale(320, dpi),
-                    y: Controls::min_client_height(dpi, self.fonts.borrow().char_height)
-                        + scale(40, dpi),
+                    x: self.s(320),
+                    y: self.min_window_height(),
                 };
                 Some(LRESULT(0))
+            }
+            WM_ENTERMENULOOP => {
+                // Alt・F10 でメニューに入ったら、「クリックで選ぶ」をやめる。続けると、メニューを閉じる Esc を
+                // 「クリックで選ぶ」の hook が握りつぶし、メニューが開いたまま残るため (クリックではメニューに
+                // 入れない。hook がクリックを握りつぶし、このアプリの窓を指したとみなしてやめる)
+                if self.picking.get() {
+                    self.cancel_pick();
+                }
+                None
             }
             WM_DPICHANGED => {
                 self.on_dpi_changed(u32::from(hiword(wparam.0)), lparam);
@@ -464,6 +474,28 @@ impl App {
     }
 
     // ---- 並べる・描く ----
+
+    /// 窓の最小の高さ: client の高さの目安に、題の帯・枠・メニューの帯の高さを足す。
+    fn min_window_height(&self) -> i32 {
+        let dpi = self.dpi.get();
+        let client_height = Controls::min_client_height(dpi, self.fonts.borrow().char_height);
+        let mut rect = RECT {
+            bottom: client_height,
+            ..Default::default()
+        };
+        // SAFETY: 主窓の style を読み、rect に書くだけ
+        let adjusted = unsafe {
+            let style = WINDOW_STYLE(GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32);
+            let ex_style = WINDOW_EX_STYLE(GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32);
+            // メニューの帯は 1 段 (項目は「ヘルプ」だけで、最小の幅でも折り返さない)
+            AdjustWindowRectExForDpi(&mut rect, style, true, ex_style, dpi)
+        };
+        match adjusted {
+            Ok(()) => rect.bottom - rect.top,
+            // 求められなければ、題の帯と枠 (40) とメニューの帯 (20) の目安を足す
+            Err(_) => client_height + self.s(60),
+        }
+    }
 
     fn arrange(&self) {
         let mut client = RECT::default();
@@ -1049,13 +1081,15 @@ impl App {
         self.set_status(status::outcome(outcome, typed, run.total, run.trial));
     }
 
-    // ---- ボタンなど ----
+    // ---- ボタン・メニューなど ----
 
     fn on_command(&self, id: u16, code: u32) {
+        // メニューの項目を選んだときも、知らせの値は 0 (BN_CLICKED と同じ)
         if code != BN_CLICKED {
             return;
         }
         match id {
+            ui::ID_ABOUT => self.show_about(),
             ui::ID_REFRESH => self.refresh_list(),
             ui::ID_PICK if self.picking.get() => self.cancel_pick(),
             ui::ID_PICK => self.start_pick(),
@@ -1066,6 +1100,22 @@ impl App {
             ui::ID_TYPE => self.start_typing(false),
             ui::ID_TRIAL => self.start_typing(true),
             _ => {}
+        }
+    }
+
+    /// 「ヘルプ」→「バージョン情報」: アプリの名前と版 (Cargo.toml の版) などを出す。閉じるまで主窓は使えない。
+    fn show_about(&self) {
+        let about = type_clipboard::about::PACKAGE.about();
+        let title = HSTRING::from(about.title);
+        let text = HSTRING::from(about.text);
+        // SAFETY: focus のある窓を読み、主窓を owner にした message box を出して、閉じたら focus を戻すだけ
+        // (主窓が前に戻ると、focus は主窓そのものに移るため)
+        unsafe {
+            let focused = GetFocus();
+            MessageBoxW(Some(self.hwnd), &text, &title, MB_OK | MB_ICONINFORMATION);
+            if !focused.is_invalid() && IsWindow(Some(focused)).as_bool() {
+                let _ = SetFocus(Some(focused));
+            }
         }
     }
 

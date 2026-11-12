@@ -6,6 +6,7 @@
 // test の失敗の文には Debug の書式を使ってよい (Cargo.toml の [lints.clippy] の use_debug)
 #![cfg_attr(test, allow(clippy::use_debug))]
 
+pub mod about;
 pub mod candidate;
 pub mod geometry;
 pub mod guard;
