@@ -1,6 +1,6 @@
 [package]
 name = "type-clipboard"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.99"
 description = "クリップボードの文字を、選んだ窓へキー入力として打ち込む Windows のアプリ"
