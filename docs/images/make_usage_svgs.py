@@ -22,8 +22,11 @@ OUT_DIR = Path(__file__).resolve().parent
 
 # ---- 台の大きさ・字・色 ----
 
-W, H = 920, 640
-TASKBAR_Y = 612
+# type-clipboard の窓のメニューの帯の高さ (「ヘルプ」だけ。src/win/ui.rs の menu_bar)。台と窓は、この分だけ高くする
+MENU_H = 20
+
+W, H = 920, 640 + MENU_H
+TASKBAR_Y = 612 + MENU_H
 
 FONT = (
     '"Yu Gothic UI", "Meiryo UI", Meiryo, "Hiragino Sans", "Hiragino Kaku Gothic ProN", '
@@ -99,13 +102,14 @@ Z_ORDER = ("vm", "vnc", "note")  # 上から
 
 # ---- type-clipboard の窓 (src/win/ui.rs の並びを縮めたもの) ----
 
-APP_X, APP_Y, APP_W, APP_H = 612, 8, 298, 596
+APP_X, APP_Y, APP_W, APP_H = 612, 8, 298, 596 + MENU_H
 TITLE_H = 28
 CX, CR = APP_X + 10, APP_X + APP_W - 10  # 中身の左右
 CW = CR - CX
-REFRESH = (752, 45, 30, 24)  # x, y, w, h
-PICK = (788, 45, 112, 24)
-LIST_Y, LIST_H, HEADER_H, ROW_H = 75, 106, 22, 20
+# 中身はメニューの帯の下から並べる
+REFRESH = (752, 45 + MENU_H, 30, 24)  # x, y, w, h
+PICK = (788, 45 + MENU_H, 112, 24)
+LIST_Y, LIST_H, HEADER_H, ROW_H = 75 + MENU_H, 106, 22, 20
 EXE_X = 802  # 一覧の exe の列の左
 ROWS = (
     ("vm", VM.title, VM.exe),
@@ -113,11 +117,11 @@ ROWS = (
     ("note", NOTE.title, NOTE.exe),
     ("", "ダウンロード - エクスプローラー", "explorer.exe"),
 )
-PANEL_Y, PANEL_H = 187, 146
+PANEL_Y, PANEL_H = 187 + MENU_H, 146
 # サムネイルを置く所: 欄から 8 px 内側で、下は札の帯を空ける (src/win/app.rs の thumbnail_area)
 THUMB_X, THUMB_Y, THUMB_W, THUMB_H = CX + 8, PANEL_Y + 8, CW - 16, PANEL_H - 40
-TYPE_BTN = (CX, 520, 174, 28)
-TRIAL_BTN = (802, 520, 98, 28)
+TYPE_BTN = (CX, 520 + MENU_H, 174, 28)
+TRIAL_BTN = (802, 520 + MENU_H, 98, 28)
 BUTTONS = {"pick": PICK, "type": TYPE_BTN}
 
 # vm01 の中: 画面 (メニューの帯の下) とパスワードの欄の左上 (窓の左上からの位置)
@@ -134,7 +138,7 @@ SPOT = {
     "vm": (300, 330),
     "pw": (PW_BOX[0] + 100, PW_BOX[1] + 14),
 }
-TOAST = (18, 548, 236, 36)
+TOAST = (18, 548 + MENU_H, 236, 36)
 KEYCAP = (478, 470)
 
 # ---- 状態 ----
@@ -238,8 +242,8 @@ SCENES = (
         "vm01 の行をクリックすると打つ先に決まり、プレビューの札が青の「打つ先」になる。",
         7.0,
         State(),
-        (602, 150),
-        moves=((0.6, 1.2, (690, 150)), (2.0, 2.3, (690, 128)), (3.1, 3.4, (690, 108))),
+        (602, 150 + MENU_H),
+        moves=((0.6, 1.2, (690, 150 + MENU_H)), (2.0, 2.3, (690, 128 + MENU_H)), (3.1, 3.4, (690, 108 + MENU_H))),
         clicks=(4.1,),
         events=(
             (4.1, {"target": "vm", "cand": "", "flash": True, "list_focus": True, "status": ("decided",)}),
@@ -254,7 +258,7 @@ SCENES = (
         "vm01 をクリックすると打つ先に決まる。そのクリックは vm01 には届かない。",
         8.0,
         State(),
-        (602, 57),  # 一覧の上を通ると候補が映るので、ボタンの行を横に進む
+        (602, 57 + MENU_H),  # 一覧の上を通ると候補が映るので、ボタンの行を横に進む
         moves=(
             (0.4, 1.1, SPOT["pick"]),
             (1.5, 2.4, SPOT["note"]),
@@ -674,6 +678,10 @@ def app(m: Motion, sc: Scene) -> str:
     out.append(f'<line x1="{APP_X}" y1="{APP_Y + TITLE_H - 0.5}" x2="{APP_X + APP_W}" y2="{APP_Y + TITLE_H - 0.5}" stroke="{LINE}"/>')
     out.append(text(CX, APP_Y + 18.5, "type-clipboard", "t12"))
     out.append(f'<g transform="translate({APP_X},{APP_Y})">{caption_buttons(APP_W)}</g>')
+    # メニューの帯 (「ヘルプ」→「バージョン情報」。打っている間も使えるので薄くしない)
+    out.append(text(CX, APP_Y + TITLE_H + 14, "ヘルプ(H)", "t12"))
+    menu_line = APP_Y + TITLE_H + MENU_H - 0.5
+    out.append(f'<line x1="{APP_X}" y1="{menu_line}" x2="{APP_X + APP_W}" y2="{menu_line}" stroke="#e2e2e2"/>')
     out.append("</g>")
     out.append(f'<rect x="{APP_X + 0.5}" y="{APP_Y + 0.5}" width="{APP_W - 1}" height="{APP_H - 1}" rx="7.5" fill="none" stroke="{LINE}"/>')
 
