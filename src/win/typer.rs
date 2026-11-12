@@ -1,4 +1,5 @@
-//! 打つ thread: 打つ先が前に来るのを待ち、IME と修飾キーを確かめてから、1 文字ずつ SendInput で送る。
+//! 打つ thread: 打つ先が前に来るのを待ち、IME と修飾キーを確かめてから、1 文字ずつ SendInput で送る。1 文字ごとに、
+//! 送る前に主窓に hook を入れ直してもらう。
 //!
 //! 打つ間は、この thread の stack を物理メモリに留める (送る INPUT の並びなど、1 文字ずつの写しが乗るため)。
 //! 打つ処理が panic しても、打つ列は消え、終わりを主窓に知らせる (主窓が hook を外す)。
@@ -6,13 +7,13 @@
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use type_clipboard::guard::INPUT_MARK;
 use type_clipboard::keymap::SHIFT_SCANCODE;
 use type_clipboard::secret::{StackLock, wipe};
-use type_clipboard::typing::{Outcome, Stroke, Strokes, run_guarded};
+use type_clipboard::typing::{Outcome, StopSignal, Stroke, Strokes, run_guarded};
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
@@ -25,13 +26,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, PostMessageW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_IME_CONTROL,
 };
 
-use super::hooks::INPUT_MARK;
-use super::{WM_APP_DONE, WM_APP_PROGRESS};
+use super::{REARMED, WM_APP_DONE, WM_APP_PROGRESS, WM_APP_REARM};
 
 /// 打つ先が前に来るまで待つ上限。
 const FOREGROUND_TIMEOUT: Duration = Duration::from_secs(2);
 /// 前に来てから打ち始めるまで置く間 (前の PowerShell の script と同じ 500 ms)。
 const SETTLE: Duration = Duration::from_millis(500);
+/// 主窓が hook を入れ直すのを待つ上限 (ms)。
+const REARM_TIMEOUT_MS: u32 = 1000;
 /// key down と key up の間。
 const HOLD: Duration = Duration::from_millis(5);
 /// WM_IME_CONTROL の IMC_GETOPENSTATUS (windows crate に無いので置く)。
@@ -45,10 +47,10 @@ pub struct Job {
     pub target: isize,
     pub strokes: Strokes,
     pub interval_ms: u32,
-    /// 進み具合と終わりを知らせる主窓
+    /// 進み具合と終わりを知らせ、hook を入れ直してもらう主窓
     pub notify: isize,
-    /// 利用者の入力があったら hook が立てる
-    pub abort: Arc<AtomicBool>,
+    /// 止める合図。hook が止めたわけを立てる
+    pub stop: Arc<StopSignal>,
 }
 
 pub fn spawn(job: Job) -> std::io::Result<JoinHandle<()>> {
@@ -83,7 +85,7 @@ fn run(job: Job) {
         strokes,
         interval_ms,
         notify,
-        abort,
+        stop,
     } = job;
     let target = HWND(target as *mut c_void);
     let notify = HWND(notify as *mut c_void);
@@ -91,7 +93,7 @@ fn run(job: Job) {
         Ok(stack) => {
             // 打つ列は work が持ち、打ち終わったら (止めたとき・panic したときも) 消える
             let finished = run_guarded(move |typed| {
-                type_all(target, notify, &strokes, interval_ms, &abort, typed)
+                type_all(target, notify, &strokes, interval_ms, &stop, typed)
             });
             // 呼び終えた関数の frame に残った写しを上書きしてから、ロックを外す
             drop(stack);
@@ -112,10 +114,10 @@ fn type_all(
     notify: HWND,
     strokes: &Strokes,
     interval_ms: u32,
-    abort: &AtomicBool,
+    stop: &StopSignal,
     typed: &mut usize,
 ) -> Outcome {
-    if let Err(outcome) = wait_for_foreground(target, abort) {
+    if let Err(outcome) = wait_for_foreground(target, stop) {
         return outcome;
     }
     if ime_open(target) == Some(true) {
@@ -126,11 +128,18 @@ fn type_all(
     }
     let interval = Duration::from_millis(u64::from(interval_ms));
     for stroke in strokes.iter() {
-        if abort.load(Ordering::SeqCst) {
-            return Outcome::StoppedByInput;
+        if let Some(why) = stop.reason() {
+            return why;
         }
         if foreground() != target {
             return Outcome::StoppedByForeground;
+        }
+        if !rearm(notify) {
+            return Outcome::RearmFailed;
+        }
+        // 入れ直す間に、止める合図が立っていないか
+        if let Some(why) = stop.reason() {
+            return why;
         }
         if !send(stroke) {
             return Outcome::SendFailed;
@@ -143,12 +152,12 @@ fn type_all(
 }
 
 /// 打つ先が前に来て、`SETTLE` だけたつのを待つ。
-fn wait_for_foreground(target: HWND, abort: &AtomicBool) -> Result<(), Outcome> {
+fn wait_for_foreground(target: HWND, stop: &StopSignal) -> Result<(), Outcome> {
     let start = Instant::now();
     let mut front_since: Option<Instant> = None;
     loop {
-        if abort.load(Ordering::SeqCst) {
-            return Err(Outcome::StoppedByInput);
+        if let Some(why) = stop.reason() {
+            return Err(why);
         }
         if foreground() == target {
             let since = *front_since.get_or_insert_with(Instant::now);
@@ -163,6 +172,28 @@ fn wait_for_foreground(target: HWND, abort: &AtomicBool) -> Result<(), Outcome> 
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// 主窓に hook を入れ直してもらい (打つ段にする)、済むまで待つ。入れ直せたか。1 文字を送る前に毎回呼ぶ。
+///
+/// 打つ先 (VMConnect など) は、前に来たとき (と、その約 0.5 秒後) に自分の低レベルの hook を入れることがある。
+/// Windows は後から入れた hook から先に呼ぶので、送る直前に入れ直し、このアプリの hook が打つ先の hook より先に
+/// キーを見るようにする。
+fn rearm(notify: HWND) -> bool {
+    let mut result = 0usize;
+    // SAFETY: 主窓に頼み、処理し終えるまで待つ。固まっていれば待たずに諦める
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            notify,
+            WM_APP_REARM,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            REARM_TIMEOUT_MS,
+            Some(&mut result),
+        )
+    };
+    sent.0 != 0 && result == REARMED
 }
 
 fn foreground() -> HWND {

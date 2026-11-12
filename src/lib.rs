@@ -8,6 +8,7 @@
 
 pub mod candidate;
 pub mod geometry;
+pub mod guard;
 pub mod keymap;
 pub mod pick;
 pub mod secret;

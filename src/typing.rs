@@ -2,7 +2,9 @@
 
 use std::ops::Deref;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::guard::Interruption;
 use crate::keymap::{KeyStroke, Layout};
 use crate::secret::{LockFailed, SecretBuf};
 
@@ -133,12 +135,20 @@ pub fn plan(text: &[u16], mode: Mode, layout: Layout) -> Result<Strokes, Refusal
 pub enum Outcome {
     /// 全部打った
     Completed,
-    /// 利用者のキー入力かクリックで止めた
-    StoppedByInput,
+    /// 手で押したキーで止めた
+    StoppedByKey,
+    /// ほかのアプリが送ったキーで止めた (照らす覚えが無いとき)
+    StoppedByOtherAppKey,
+    /// ほかのアプリが送った、覚えている直前のこのアプリのキーと形の違うキーで止めた
+    StoppedByUnmatchedKey,
+    /// クリックで止めた
+    StoppedByClick,
     /// ほかの窓が前に来たので止めた
     StoppedByForeground,
     /// 打つ先を前に出せなかった
     NotForeground,
+    /// 1 文字を送る前に、キー入力を見張る hook を入れ直せなかった
+    RearmFailed,
     /// 打つ先で IME がオンだった
     ImeOn,
     /// 打ち始めに修飾キーが押されたままだった
@@ -149,19 +159,26 @@ pub enum Outcome {
     CannotLockMemory,
     /// 打つ処理が途中で異常終了した (panic・知らせずに終わった)。主窓は hook を外す
     Crashed,
+    /// このアプリを閉じるので止めた
+    Cancelled,
 }
 
 impl Outcome {
-    pub const ALL: [Outcome; 9] = [
+    pub const ALL: [Outcome; 14] = [
         Outcome::Completed,
-        Outcome::StoppedByInput,
+        Outcome::StoppedByKey,
+        Outcome::StoppedByOtherAppKey,
+        Outcome::StoppedByUnmatchedKey,
+        Outcome::StoppedByClick,
         Outcome::StoppedByForeground,
         Outcome::NotForeground,
+        Outcome::RearmFailed,
         Outcome::ImeOn,
         Outcome::ModifierHeld,
         Outcome::SendFailed,
         Outcome::CannotLockMemory,
         Outcome::Crashed,
+        Outcome::Cancelled,
     ];
 
     pub fn code(self) -> usize {
@@ -170,6 +187,38 @@ impl Outcome {
 
     pub fn from_code(code: usize) -> Option<Outcome> {
         Self::ALL.into_iter().find(|outcome| outcome.code() == code)
+    }
+}
+
+impl From<Interruption> for Outcome {
+    fn from(why: Interruption) -> Outcome {
+        match why {
+            Interruption::Key => Outcome::StoppedByKey,
+            Interruption::OtherAppKey => Outcome::StoppedByOtherAppKey,
+            Interruption::UnmatchedKey => Outcome::StoppedByUnmatchedKey,
+            Interruption::Click => Outcome::StoppedByClick,
+        }
+    }
+}
+
+/// 打つのを止める合図と、そのわけ。hook (UI の thread) と主窓が立て、打つ thread が 1 文字ごとに見る。
+/// 最初に立てたわけを残す。
+#[derive(Debug, Default)]
+pub struct StopSignal(AtomicUsize);
+
+impl StopSignal {
+    /// わけ `why` で止める。もう止めていれば、前のわけを残す。
+    pub fn raise(&self, why: Outcome) {
+        // 0 は「止めていない」。わけは code + 1 で持つ
+        let _ = self
+            .0
+            .compare_exchange(0, why.code() + 1, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// 止めたわけ。止めていなければ `None`。
+    pub fn reason(&self) -> Option<Outcome> {
+        let raised = self.0.load(Ordering::SeqCst);
+        raised.checked_sub(1).and_then(Outcome::from_code)
     }
 }
 
@@ -328,6 +377,36 @@ mod tests {
             assert_eq!(Outcome::from_code(outcome.code()), Some(outcome));
         }
         assert_eq!(Outcome::from_code(usize::MAX), None);
+    }
+
+    #[test]
+    fn each_interruption_has_its_own_outcome() {
+        let table = [
+            (Interruption::Key, Outcome::StoppedByKey),
+            (Interruption::OtherAppKey, Outcome::StoppedByOtherAppKey),
+            (Interruption::UnmatchedKey, Outcome::StoppedByUnmatchedKey),
+            (Interruption::Click, Outcome::StoppedByClick),
+        ];
+        for (why, outcome) in table {
+            assert_eq!(Outcome::from(why), outcome, "{why:?}");
+        }
+    }
+
+    #[test]
+    fn stop_signal_is_clear_until_raised() {
+        let stop = StopSignal::default();
+        assert_eq!(stop.reason(), None);
+        stop.raise(Outcome::StoppedByClick);
+        assert_eq!(stop.reason(), Some(Outcome::StoppedByClick));
+    }
+
+    #[test]
+    fn stop_signal_keeps_the_first_reason() {
+        let stop = StopSignal::default();
+        stop.raise(Outcome::StoppedByOtherAppKey);
+        stop.raise(Outcome::StoppedByKey);
+        stop.raise(Outcome::Cancelled);
+        assert_eq!(stop.reason(), Some(Outcome::StoppedByOtherAppKey));
     }
 
     #[test]

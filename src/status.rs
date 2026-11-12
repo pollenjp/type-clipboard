@@ -145,13 +145,21 @@ pub fn outcome(outcome: Outcome, typed: usize, total: usize, trial: bool) -> Sta
             format!("{total} 文字を打ちました"),
             "Enter は打つ先で自分で押す",
         ),
-        Outcome::StoppedByInput => stopped("キー入力かクリックがあったため"),
+        // どのキーだったかは出さない
+        Outcome::StoppedByKey => stopped("手で押したキーがあったため"),
+        Outcome::StoppedByOtherAppKey => stopped("ほかのアプリが送ったキーがあったため"),
+        Outcome::StoppedByUnmatchedKey => {
+            stopped("ほかのアプリが送ったキーがあったため (直前に打ったキーの写しと合わない)")
+        }
+        Outcome::StoppedByClick => stopped("クリックがあったため"),
         Outcome::StoppedByForeground => stopped("ほかの窓が前に来たため"),
+        Outcome::Cancelled => stopped("このアプリを閉じたため"),
         Outcome::NotForeground => Status::new(
             Kind::Warn,
             "打つ先を前に出せませんでした",
             "打つ先の窓を一度クリックしてから、もう一度押してください",
         ),
+        Outcome::RearmFailed => stopped("キー入力を見張る hook を入れ直せなかったため"),
         Outcome::ImeOn => Status::new(
             Kind::Warn,
             "打つ先で IME がオンなので打ちません",
@@ -191,9 +199,49 @@ mod tests {
         assert_eq!(stopped.text, "止めました (12 / 60)");
         assert_eq!(stopped.sub, "ほかの窓が前に来たため");
         assert_eq!(
-            outcome(Outcome::StoppedByInput, 3, 60, false).text,
+            outcome(Outcome::StoppedByKey, 3, 60, false).text,
             "止めました (3 / 60)"
         );
+    }
+
+    /// 止めたわけ (手で押したキー・ほかのアプリのキー・クリックなど) を見分けられる。
+    #[test]
+    fn stop_reasons_are_told_apart() {
+        // hook は 1 文字ごとに入れ直すので、入れ直せなかったときも途中まで打っている
+        let stops = [
+            Outcome::StoppedByKey,
+            Outcome::StoppedByOtherAppKey,
+            Outcome::StoppedByUnmatchedKey,
+            Outcome::StoppedByClick,
+            Outcome::StoppedByForeground,
+            Outcome::RearmFailed,
+            Outcome::Cancelled,
+        ];
+        let subs: Vec<String> = stops
+            .iter()
+            .map(|&o| {
+                let s = outcome(o, 3, 60, false);
+                assert_eq!(s.kind, Kind::Warn, "{o:?}");
+                assert_eq!(s.text, "止めました (3 / 60)", "{o:?}");
+                s.sub
+            })
+            .collect();
+        for (i, a) in subs.iter().enumerate() {
+            for b in &subs[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn rearm_failure_is_told_apart_from_other_outcomes() {
+        let s = outcome(Outcome::RearmFailed, 0, 60, false);
+        assert_eq!(s.kind, Kind::Warn);
+        for other in Outcome::ALL {
+            if other != Outcome::RearmFailed {
+                assert_ne!(outcome(other, 0, 60, false), s, "{other:?}");
+            }
+        }
     }
 
     #[test]

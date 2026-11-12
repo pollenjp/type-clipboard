@@ -27,6 +27,11 @@ const WM_APP_PICK_CLICK: u32 = WM_APP + 4;
 const WM_APP_PICK_CANCEL: u32 = WM_APP + 5;
 /// hook から: 左クリックのボタンを離した。
 const WM_APP_PICK_RELEASED: u32 = WM_APP + 6;
+/// 打つ thread から (SendMessage で、済むまで待つ。1 文字を送る前に毎回): hook を入れ直して打つ段にする。
+/// 入れ直せたら `REARMED` を返す。
+const WM_APP_REARM: u32 = WM_APP + 7;
+/// `WM_APP_REARM` の答え: 入れ直せた。
+const REARMED: usize = 1;
 
 /// 起動のすぐ後 (クリップボードに触れる前) に、秘密の写しがプロセスの外に出る経路を閉じる。
 ///

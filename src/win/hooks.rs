@@ -2,18 +2,21 @@
 //!
 //! - クリックで選ぶ: マウスの位置を主窓に知らせ、左クリックを握りつぶして (相手の窓に届けず) 決める。
 //!   Esc・左以外のボタンでやめる。押す方を握りつぶしたボタンは、離す方も握りつぶす (`PickMouse`)。
-//! - 打っている間: このアプリが送った入力 (`INPUT_MARK` の印つき) でないキーの押下かクリックがあれば、
-//!   止める合図を立てる。キーの押下は打つ先に届けない。
+//! - 打っている間: 入力を段 (`guard::Stage`) の規則で判定し、止めるなら止めたわけを合図に立てる。止めたキーの
+//!   押下は打つ先に届けない。待つ段 (打つ先が前に来て落ち着くまで) の hook を入れ、1 文字を送る前に毎回、打つ段の
+//!   hook を入れ直す (打つ先が入れた hook より先に、このアプリの hook を呼ばせるため)。
 //!
-//! hook は入れた thread (UI の thread) で呼ばれるので、状態は thread_local に置く。
+//! hook は入れた thread (UI の thread) で呼ばれるので、状態は thread_local に置く。打つ段で覚える直前のキーは、
+//! 秘密専用のページに置く (`guard::LastOwnKey`)。
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use type_clipboard::geometry::pack_point;
+use type_clipboard::guard::{Click, KeyEvent, Stage, Verdict};
 use type_clipboard::pick::{Button, MouseEvent, PickMouse, PickNotice};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use type_clipboard::typing::StopSignal;
+use windows::Win32::Foundation::{E_UNEXPECTED, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -25,19 +28,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::{WM_APP_PICK_CANCEL, WM_APP_PICK_CLICK, WM_APP_PICK_MOVE, WM_APP_PICK_RELEASED};
 
-/// このアプリが SendInput で送る入力の `dwExtraInfo`。利用者の入力と見分ける。
-pub const INPUT_MARK: usize = 0x5459_4350;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// hook を入れる目的。
 pub enum HookMode {
+    /// クリックで選ぶ
     Pick,
-    Typing,
+    /// 打っている間 (待つ段か打つ段)。止めたら、わけを `stop` に立てる
+    Guard { stage: Stage, stop: Arc<StopSignal> },
 }
 
 struct HookState {
     mode: HookMode,
     notify: HWND,
-    abort: Arc<AtomicBool>,
     pick: PickMouse,
 }
 
@@ -62,17 +63,18 @@ impl Drop for HookGuard {
     }
 }
 
-/// hook を入れる。`notify` に WM_APP_PICK_* を送り、打っている間の利用者の入力で `abort` を立てる。
-pub fn install(
-    mode: HookMode,
-    notify: HWND,
-    abort: Arc<AtomicBool>,
-) -> windows::core::Result<HookGuard> {
+/// hook を入れる。クリックで選ぶ間は `notify` に WM_APP_PICK_* を送る。
+///
+/// 前の hook (`HookGuard`) は、先に外しておく。外していなければ断る (前の HookGuard を後から外すと、ここで
+/// 入れた hook の状態まで消え、打っている間の入力で止まらなくなるため)。
+pub fn install(mode: HookMode, notify: HWND) -> windows::core::Result<HookGuard> {
+    if STATE.with(|state| state.borrow().is_some()) {
+        return Err(windows::core::Error::from_hresult(E_UNEXPECTED));
+    }
     STATE.with(|state| {
         *state.borrow_mut() = Some(HookState {
             mode,
             notify,
-            abort,
             pick: PickMouse::default(),
         })
     });
@@ -140,20 +142,36 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     if code == HC_ACTION as i32 {
         // SAFETY: WH_KEYBOARD_LL の lparam は KBDLLHOOKSTRUCT を指す
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-        let pressed = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-        let ours = info.dwExtraInfo == INPUT_MARK;
-        let swallow = STATE.with(|state| match state.borrow().as_ref() {
-            Some(s) if s.mode == HookMode::Typing && pressed && !ours => {
-                s.abort.store(true, Ordering::SeqCst);
-                true
+        let swallow = STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            let Some(s) = state.as_mut() else {
+                return false;
+            };
+            match &mut s.mode {
+                HookMode::Guard { stage, stop } => {
+                    let key = KeyEvent::from_hook(
+                        info.vkCode,
+                        info.scanCode,
+                        info.flags.0,
+                        info.dwExtraInfo,
+                    );
+                    match stage.key(key) {
+                        Verdict::Pass => false,
+                        Verdict::Stop(why) => {
+                            stop.raise(why.into());
+                            true
+                        }
+                    }
+                }
+                HookMode::Pick => {
+                    let pressed = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+                    let escape = pressed && info.vkCode == u32::from(VK_ESCAPE.0);
+                    if escape {
+                        post(s.notify, WM_APP_PICK_CANCEL, 0);
+                    }
+                    escape
+                }
             }
-            Some(s)
-                if s.mode == HookMode::Pick && pressed && info.vkCode == u32::from(VK_ESCAPE.0) =>
-            {
-                post(s.notify, WM_APP_PICK_CANCEL, 0);
-                true
-            }
-            _ => false,
         });
         if swallow {
             return LRESULT(1);
@@ -168,17 +186,20 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         // SAFETY: WH_MOUSE_LL の lparam は MSLLHOOKSTRUCT を指す
         let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
         let msg = wparam.0 as u32;
-        let ours = info.dwExtraInfo == INPUT_MARK;
         let swallow = STATE.with(|state| {
             let mut state = state.borrow_mut();
             let Some(s) = state.as_mut() else {
                 return false;
             };
-            match s.mode {
-                HookMode::Typing => {
-                    if !ours && is_button_down(msg) {
-                        s.abort.store(true, Ordering::SeqCst);
+            match &s.mode {
+                HookMode::Guard { stage, stop } => {
+                    if is_button_down(msg)
+                        && let Verdict::Stop(why) =
+                            stage.click(Click::from_hook(info.flags, info.dwExtraInfo))
+                    {
+                        stop.raise(why.into());
                     }
+                    // クリックは握りつぶさない
                     false
                 }
                 HookMode::Pick => {
