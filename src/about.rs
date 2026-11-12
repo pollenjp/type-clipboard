@@ -109,22 +109,35 @@ mod tests {
         assert_eq!(no_links.about().text, "app 1.2.3\n説明の文");
     }
 
-    /// 出す版は Cargo.toml の [package] の version (Release の tag の v を除いたもの)。
+    /// 出す版・説明・repo・ライセンスは、Cargo.toml の [package] に書いた値。空の項目は出さないので、取り違えると
+    /// 黙って行が消える (例: repository の代わりに、書いていない homepage を読む)。Cargo.toml を読んで比べる。
     #[test]
-    fn this_app_shows_the_version_written_in_cargo_toml() {
+    fn this_app_shows_what_cargo_toml_says() {
         let manifest = include_str!("../Cargo.toml");
-        let version = manifest
-            .lines()
-            .skip_while(|line| line.trim() != "[package]")
-            .skip(1)
-            .take_while(|line| !line.starts_with('['))
-            .find_map(|line| line.strip_prefix("version = \""))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .expect("Cargo.toml の [package] に version がある");
+        let field = |key: &str| {
+            let prefix = format!("{key} = \"");
+            manifest
+                .lines()
+                .skip_while(|line| line.trim() != "[package]")
+                .skip(1)
+                .take_while(|line| !line.starts_with('['))
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .and_then(|rest| rest.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("Cargo.toml の [package] に {key} がある"))
+                .to_string()
+        };
         let text = PACKAGE.about().text;
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
-            text.lines().next(),
-            Some(format!("type-clipboard {version}").as_str())
+            lines.first().copied(),
+            Some(format!("type-clipboard {}", field("version")).as_str())
         );
+        for expected in [
+            field("description"),
+            field("repository"),
+            format!("ライセンス: {}", field("license")),
+        ] {
+            assert!(lines.contains(&expected.as_str()), "{expected:?} が無い");
+        }
     }
 }

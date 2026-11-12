@@ -611,6 +611,9 @@ impl App {
     fn update_clipboard(&self) {
         // 写しは作らず、クリップボードを開いている間に数える
         let counted = clipboard::with_text(self.hwnd, typeable_len);
+        // 数えた frame は、数えた直後にも上書きする。modal loop (バージョン情報の箱・メニュー・窓を動かしている間)
+        // の中で数えると、message loop での上書きはそれが終わるまで来ず、数えた frame もいつもより深い所にあるため
+        secret::scrub_stack();
         self.scrub_pending.set(true);
         let text = match counted {
             ClipText::Text(0) | ClipText::Empty => "クリップボード: 空".to_string(),

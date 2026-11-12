@@ -22,8 +22,8 @@
 ### 使っている版の確かめ方
 
 窓の左上のメニューの「ヘルプ」→「バージョン情報」(キーボードなら Alt+H → A) で、名前と版 (`type-clipboard 0.2.1`
-など) が出る。版は `Cargo.toml` の版で、Release の tag (`v0.2.1` など) から `v` を除いたもの。CI の成果物 (出る前の版) は、
-`Cargo.toml` の版を上げるまで、前の Release と同じ版を出す。
+など) が出る。版は `Cargo.toml` の版で、Release の tag は、この版に `v` を付けて打つ (`v0.2.1` など。下の「Release の
+出し方」)。CI の成果物 (出る前の版) は、`Cargo.toml` の版を上げるまで、前の Release と同じ版を出す。
 
 ### SmartScreen の警告
 
