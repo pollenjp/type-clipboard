@@ -4,15 +4,15 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use type_clipboard::candidate::{Elevation, is_pickable};
 use type_clipboard::geometry::{Rect, unpack_point};
+use type_clipboard::guard::Stage;
 use type_clipboard::secret::{self, StackLock};
 use type_clipboard::settings::{self, Settings, WindowRect};
 use type_clipboard::status::{self, Kind, Status};
-use type_clipboard::typing::{Mode, Outcome, Refusal, TEST_SAMPLE, plan, typeable_len};
+use type_clipboard::typing::{Mode, Outcome, Refusal, StopSignal, TEST_SAMPLE, plan, typeable_len};
 use windows::Win32::Foundation::{
     COLORREF, E_OUTOFMEMORY, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
@@ -53,8 +53,8 @@ use super::target::{self, WindowEntry};
 use super::typer::{self, Job};
 use super::ui::{self, AMBER, BLUE, Controls, Fonts, GREEN, MUTED, ORANGE, scale};
 use super::{
-    WM_APP_DONE, WM_APP_PICK_CANCEL, WM_APP_PICK_CLICK, WM_APP_PICK_MOVE, WM_APP_PICK_RELEASED,
-    WM_APP_PROGRESS,
+    REARMED, WM_APP_DONE, WM_APP_PICK_CANCEL, WM_APP_PICK_CLICK, WM_APP_PICK_MOVE,
+    WM_APP_PICK_RELEASED, WM_APP_PROGRESS, WM_APP_REARM,
 };
 
 const CLASS_NAME: PCWSTR = w!("TypeClipboardMain");
@@ -98,7 +98,8 @@ struct App {
     flashing: Cell<bool>,
     hooks: RefCell<Option<HookGuard>>,
     run: Cell<Option<Run>>,
-    abort: RefCell<Arc<AtomicBool>>,
+    /// 打っている最中の止める合図 (hook と打つ thread が分け合う)
+    stop: RefCell<Arc<StopSignal>>,
     worker: RefCell<Option<JoinHandle<()>>>,
     /// ListView の選択を自分で変えている間は、打つ先を決めたとみなさない
     suppress_list: Cell<bool>,
@@ -287,7 +288,7 @@ impl App {
             flashing: Cell::new(false),
             hooks: RefCell::new(None),
             run: Cell::new(None),
-            abort: RefCell::new(Arc::new(AtomicBool::new(false))),
+            stop: RefCell::new(Arc::new(StopSignal::default())),
             worker: RefCell::new(None),
             suppress_list: Cell::new(false),
             tracking_list_mouse: Cell::new(false),
@@ -415,6 +416,10 @@ impl App {
             WM_APP_DONE => {
                 self.on_done(wparam.0, usize::try_from(lparam.0).unwrap_or(0));
                 Some(LRESULT(0))
+            }
+            WM_APP_REARM => {
+                let rearmed = if self.rearm() { REARMED } else { 0 };
+                Some(LRESULT(rearmed as isize))
             }
             WM_APP_PICK_MOVE => {
                 self.on_pick_move(point_from(lparam));
@@ -787,8 +792,7 @@ impl App {
         }
         // 前のクリックのボタンを離すのを待っている hook があれば外す
         self.release_pick_hooks();
-        let unused = Arc::new(AtomicBool::new(false));
-        match hooks::install(HookMode::Pick, self.hwnd, unused) {
+        match hooks::install(HookMode::Pick, self.hwnd) {
             Ok(guard) => *self.hooks.borrow_mut() = Some(guard),
             Err(e) => {
                 self.set_status(Status::new(
@@ -937,8 +941,14 @@ impl App {
             return;
         }
 
-        let abort = Arc::new(AtomicBool::new(false));
-        match hooks::install(HookMode::Typing, self.hwnd, abort.clone()) {
+        // 待つ段の hook: 打つ先を前に出す前から、手で押したキーとクリックで止める。打つ thread が 1 文字ごとに、
+        // 送る前に打つ段の hook に入れ直してもらう (rearm)
+        let stop = Arc::new(StopSignal::default());
+        let waiting = HookMode::Guard {
+            stage: Stage::Waiting,
+            stop: stop.clone(),
+        };
+        match hooks::install(waiting, self.hwnd) {
             Ok(guard) => *self.hooks.borrow_mut() = Some(guard),
             Err(e) => {
                 self.set_status(Status::new(
@@ -949,7 +959,7 @@ impl App {
                 return;
             }
         }
-        *self.abort.borrow_mut() = abort.clone();
+        *self.stop.borrow_mut() = stop.clone();
         let total = strokes.len();
         self.run.set(Some(Run {
             total,
@@ -974,11 +984,38 @@ impl App {
             strokes,
             interval_ms: self.ui.interval_ms(),
             notify: self.hwnd.0 as isize,
-            abort,
+            stop,
         };
         match typer::spawn(job) {
             Ok(handle) => *self.worker.borrow_mut() = Some(handle),
             Err(_) => self.on_done(Outcome::SendFailed.code(), 0),
+        }
+    }
+
+    /// 打つ thread に頼まれて (`WM_APP_REARM`。1 文字を送る前に毎回)、hook を打つ段に入れ直す。入れ直せたか。
+    ///
+    /// Windows は後から入れた低レベルの hook から先に呼ぶので、打つ先 (VMConnect など) が前に来たとき (と、その
+    /// 約 0.5 秒後) に入れた hook より先に、このアプリの hook がキーを見る。段は作り直すので、写しと照らす覚えは
+    /// 消える。入れ直せなければ、打つ thread はそこで止める。
+    fn rearm(&self) -> bool {
+        if self.run.get().is_none() || self.hooks.borrow().is_none() {
+            return false;
+        }
+        let Ok(stage) = Stage::typing() else {
+            return false;
+        };
+        // 前の hook を外してから入れる (外すと hook の状態も消えるため、入れた後に外すと新しい状態を消す)
+        self.hooks.borrow_mut().take();
+        let typing = HookMode::Guard {
+            stage,
+            stop: self.stop.borrow().clone(),
+        };
+        match hooks::install(typing, self.hwnd) {
+            Ok(guard) => {
+                *self.hooks.borrow_mut() = Some(guard);
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -1057,7 +1094,7 @@ impl App {
     fn shutdown(&self) {
         // 打つ thread が SendInput で hook を待たないよう、先に hook を外してから止める
         self.hooks.borrow_mut().take();
-        self.abort.borrow().store(true, Ordering::SeqCst);
+        self.stop.borrow().raise(Outcome::Cancelled);
         if let Some(worker) = self.worker.borrow_mut().take() {
             typer::finish(worker);
         }
